@@ -7,15 +7,16 @@ pipeline {
     }
 
     environment {
-        REPO_OWNER    = 'chvkarthik-87'
-        REPO_NAME     = 'jenkins-config-automation'
-        SOURCE_BRANCH = 'feature/config-update'
-        TARGET_BRANCH = 'main'
-        GITHUB_API    = 'https://api.github.com/repos/chvkarthik-87/jenkins-config-automation'
+        GITHUB_REPO = 'chvkarthik-87/jenkins-config-automation'
+        GITHUB_API = 'https://api.github.com'
+        FEATURE_BRANCH = 'feature/config-update'
+        MAIN_BRANCH = 'main'
+
+        NEXUS_URL = 'http://98.83.162.0:8081'
+        NEXUS_REPOSITORY = 'deploy-artifacts'
     }
 
     stages {
-
         stage('Checkout Feature Branch') {
             steps {
                 dir('source') {
@@ -23,11 +24,47 @@ pipeline {
                     git branch: 'feature/config-update',
                         url: 'https://github.com/chvkarthik-87/jenkins-config-automation.git'
                 }
+
+                sh '''
+                    set -eu
+                    test -f source/deploy.sh
+                    echo "Feature branch checkout successful."
+                '''
             }
         }
 
-        stage('Sync Main and Auto-Resolve Known Conflict') {
+        stage('Sync Main Branch') {
             steps {
+                dir('source') {
+                    sh '''
+                        set -eu
+
+                        git config user.name "Jenkins Automation"
+                        git config user.email "jenkins-automation@users.noreply.github.com"
+
+                        git fetch origin main feature/config-update
+                        git checkout feature/config-update
+                        git reset --hard origin/feature/config-update
+
+                        if git merge --no-edit origin/main; then
+                            echo "Main merged without conflicts."
+                        else
+                            CONFLICTS=$(git diff --name-only --diff-filter=U)
+
+                            if [ "$CONFLICTS" = "Jenkinsfile-bash-validation" ]; then
+                                git checkout --ours -- Jenkinsfile-bash-validation
+                                git add Jenkinsfile-bash-validation
+                                git commit --no-edit
+                            else
+                                echo "Unexpected conflict; stopping safely."
+                                printf '%s\\n' "$CONFLICTS"
+                                git merge --abort || true
+                                exit 1
+                            fi
+                        fi
+                    '''
+                }
+
                 withCredentials([
                     usernamePassword(
                         credentialsId: 'github-jenkins-token',
@@ -38,49 +75,10 @@ pipeline {
                     dir('source') {
                         sh '''
                             set -eu
-
-                            git config user.name "Jenkins Automation"
-                            git config user.email "jenkins-automation@users.noreply.github.com"
-
-                            echo "Fetching latest main and feature branches..."
-
-                            git fetch origin \
-                              "+refs/heads/main:refs/remotes/origin/main" \
-                              "+refs/heads/feature/config-update:refs/remotes/origin/feature/config-update"
-
-                            git checkout feature/config-update
-                            git reset --hard origin/feature/config-update
-
-                            echo "Merging main into feature branch..."
-
-                            if git merge --no-edit origin/main; then
-                                echo "Main merged without conflicts."
-                            else
-                                CONFLICTS=$(git diff --name-only --diff-filter=U)
-
-                                if [ "$CONFLICTS" = "Jenkinsfile-bash-validation" ]; then
-                                    echo "Known conflict detected."
-                                    echo "Keeping feature branch version of Jenkinsfile-bash-validation."
-
-                                    git checkout --ours -- Jenkinsfile-bash-validation
-                                    git add Jenkinsfile-bash-validation
-                                    git commit --no-edit
-                                else
-                                    echo "ERROR: Unexpected conflict detected:"
-                                    printf '%s\\n' "$CONFLICTS"
-                                    git merge --abort || true
-                                    exit 1
-                                fi
-                            fi
-
-                            echo "Pushing synchronized feature branch..."
-
                             AUTH=$(printf '%s' "$GH_USER:$GH_TOKEN" | base64 | tr -d '\\n')
 
                             git -c http.extraheader="AUTHORIZATION: basic $AUTH" \
                                 push origin HEAD:feature/config-update
-
-                            echo "Feature branch synchronized successfully."
                         '''
                     }
                 }
@@ -89,57 +87,39 @@ pipeline {
 
         stage('Bash Syntax Validation') {
             steps {
-                dir('source') {
-                    sh '''
-                        set -eu
-
-                        test -f deploy.sh || {
-                            echo "ERROR: deploy.sh not found"
-                            exit 1
-                        }
-
-                        bash -n deploy.sh
-                        echo "Bash syntax validation passed."
-                    '''
-                }
+                sh '''
+                    set -eu
+                    bash -n source/deploy.sh
+                    echo "Bash syntax validation passed."
+                '''
             }
         }
 
         stage('Bash Formatting Validation') {
             steps {
-                dir('source') {
-                    sh '''
-                        set -eu
-
-                        command -v shfmt >/dev/null 2>&1 || {
-                            echo "ERROR: shfmt is not installed."
-                            exit 1
-                        }
-
-                        shfmt -d deploy.sh
-                        echo "Bash formatting validation passed."
-                    '''
-                }
+                sh '''
+                    set -eu
+                    shfmt -d source/deploy.sh
+                    echo "Bash formatting validation passed."
+                '''
             }
         }
 
-        stage('Package and Archive Artifact') {
+        stage('Package Artifact') {
             steps {
-                dir('source') {
-                    sh '''
-                        set -eu
+                sh '''
+                    set -eu
+                    mkdir -p source/artifacts
 
-                        mkdir -p artifacts
+                    tar -czf "source/artifacts/deploy-script-${BUILD_NUMBER}.tar.gz" \
+                        -C source deploy.sh
 
-                        ARTIFACT="artifacts/deploy-script-${BUILD_NUMBER}.tar.gz"
+                    cd source/artifacts
+                    sha256sum "deploy-script-${BUILD_NUMBER}.tar.gz" \
+                        > "deploy-script-${BUILD_NUMBER}.tar.gz.sha256"
 
-                        tar -czf "$ARTIFACT" deploy.sh
-                        sha256sum "$ARTIFACT" > "${ARTIFACT}.sha256"
-
-                        echo "Artifact created successfully:"
-                        ls -lh artifacts/
-                    '''
-                }
+                    ls -lh
+                '''
 
                 archiveArtifacts(
                     artifacts: 'source/artifacts/*',
@@ -148,75 +128,41 @@ pipeline {
             }
         }
 
-        stage('Create or Reuse GitHub PR') {
+        stage('Upload Artifact to Nexus') {
             steps {
                 withCredentials([
                     usernamePassword(
-                        credentialsId: 'github-jenkins-token',
-                        usernameVariable: 'GH_USER',
-                        passwordVariable: 'GH_TOKEN'
+                        credentialsId: 'nexus-credentials',
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASS'
                     )
                 ]) {
-                    dir('source') {
-                        sh '''
-                            set -eu
+                    sh '''
+                        set -eu
 
-                            curl -fsS \
-                                -H "Accept: application/vnd.github+json" \
-                                -H "Authorization: Bearer $GH_TOKEN" \
-                                -H "X-GitHub-Api-Version: 2022-11-28" \
-                                "$GITHUB_API/pulls?state=open&head=$REPO_OWNER:$SOURCE_BRANCH&base=$TARGET_BRANCH" \
-                                -o open_prs.json
+                        ARTIFACT="source/artifacts/deploy-script-${BUILD_NUMBER}.tar.gz"
+                        CHECKSUM="${ARTIFACT}.sha256"
 
-                            PR_NUMBER=$(python3 -c \
-                                'import json; p=json.load(open("open_prs.json")); print(p[0]["number"] if p else "")')
+                        test -f "$ARTIFACT"
+                        test -f "$CHECKSUM"
 
-                            if [ -z "$PR_NUMBER" ]; then
-                                cat > pr_payload.json <<'JSON'
-{
-  "title": "Bash validation and artifact packaging",
-  "body": "Jenkins validates Bash syntax and formatting, packages deploy.sh, archives the artifact, and merges the pull request.",
-  "head": "feature/config-update",
-  "base": "main"
-}
-JSON
+                        curl --fail --silent --show-error \
+                            --user "$NEXUS_USER:$NEXUS_PASS" \
+                            --upload-file "$ARTIFACT" \
+                            "$NEXUS_URL/repository/$NEXUS_REPOSITORY/deploy-script-${BUILD_NUMBER}.tar.gz"
 
-                                HTTP_CODE=$(curl -sS \
-                                    -o pr_response.json \
-                                    -w '%{http_code}' \
-                                    -X POST \
-                                    -H "Accept: application/vnd.github+json" \
-                                    -H "Authorization: Bearer $GH_TOKEN" \
-                                    -H "X-GitHub-Api-Version: 2022-11-28" \
-                                    "$GITHUB_API/pulls" \
-                                    -d @pr_payload.json)
+                        curl --fail --silent --show-error \
+                            --user "$NEXUS_USER:$NEXUS_PASS" \
+                            --upload-file "$CHECKSUM" \
+                            "$NEXUS_URL/repository/$NEXUS_REPOSITORY/deploy-script-${BUILD_NUMBER}.tar.gz.sha256"
 
-                                if [ "$HTTP_CODE" != "201" ]; then
-                                    echo "ERROR: PR creation failed. HTTP $HTTP_CODE"
-                                    cat pr_response.json
-                                    exit 1
-                                fi
-
-                                PR_NUMBER=$(python3 -c \
-                                    'import json; print(json.load(open("pr_response.json"))["number"])')
-
-                                echo "Created PR #$PR_NUMBER"
-                            else
-                                echo "Reusing existing PR #$PR_NUMBER"
-                            fi
-
-                            echo "$PR_NUMBER" > pr_number.txt
-                        '''
-
-                        script {
-                            env.PR_NUMBER = readFile('pr_number.txt').trim()
-                        }
-                    }
+                        echo "Artifact and checksum uploaded to Nexus."
+                    '''
                 }
             }
         }
 
-        stage('Merge PR into Main') {
+        stage('Create or Reuse Pull Request') {
             steps {
                 withCredentials([
                     usernamePassword(
@@ -225,49 +171,83 @@ JSON
                         passwordVariable: 'GH_TOKEN'
                     )
                 ]) {
-                    dir('source') {
-                        sh '''
-                            set -eu
+                    sh '''
+                        set -eu
 
-                            test -n "${PR_NUMBER:-}" || {
-                                echo "ERROR: PR number is missing."
-                                exit 1
-                            }
+                        RESPONSE=$(curl --fail --silent --show-error \
+                            -H "Authorization: Bearer $GH_TOKEN" \
+                            -H "Accept: application/vnd.github+json" \
+                            "$GITHUB_API/repos/$GITHUB_REPO/pulls?state=open&head=chvkarthik-87:$FEATURE_BRANCH&base=$MAIN_BRANCH")
 
-                            cat > merge_payload.json <<'JSON'
-{
-  "merge_method": "squash"
-}
-JSON
-
-                            HTTP_CODE=$(curl -sS \
-                                -o merge_response.json \
-                                -w '%{http_code}' \
-                                -X PUT \
-                                -H "Accept: application/vnd.github+json" \
-                                -H "Authorization: Bearer $GH_TOKEN" \
-                                -H "X-GitHub-Api-Version: 2022-11-28" \
-                                "$GITHUB_API/pulls/$PR_NUMBER/merge" \
-                                -d @merge_payload.json)
-
-                            if [ "$HTTP_CODE" != "200" ]; then
-                                echo "ERROR: GitHub merge failed. HTTP $HTTP_CODE"
-                                cat merge_response.json
-                                exit 1
-                            fi
-
-                            python3 -c '
+                        PR_NUMBER=$(printf '%s' "$RESPONSE" | python3 -c '
 import json, sys
-data = json.load(open("merge_response.json"))
-if data.get("merged") is not True:
-    print(json.dumps(data, indent=2))
-    sys.exit(1)
+items = json.load(sys.stdin)
+print(items[0]["number"] if items else "")
+')
+
+                        if [ -z "$PR_NUMBER" ]; then
+                            PAYLOAD=$(python3 -c '
+import json, os
+print(json.dumps({
+    "title": "Bash validation and artifact packaging",
+    "head": os.environ["FEATURE_BRANCH"],
+    "base": os.environ["MAIN_BRANCH"],
+    "body": "Jenkins validates deploy.sh, packages the artifact, and uploads it to Nexus."
+}))
+')
+
+                            RESPONSE=$(curl --fail --silent --show-error \
+                                -X POST \
+                                -H "Authorization: Bearer $GH_TOKEN" \
+                                -H "Accept: application/vnd.github+json" \
+                                -H "Content-Type: application/json" \
+                                -d "$PAYLOAD" \
+                                "$GITHUB_API/repos/$GITHUB_REPO/pulls")
+
+                            PR_NUMBER=$(printf '%s' "$RESPONSE" | python3 -c '
+import json, sys
+print(json.load(sys.stdin)["number"])
+')
+                        fi
+
+                        echo "$PR_NUMBER" > "$WORKSPACE/pr-number.txt"
+                        echo "Using PR #$PR_NUMBER"
+                    '''
+                }
+            }
+        }
+
+        stage('Merge Pull Request') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'github-jenkins-token',
+                        usernameVariable: 'GH_USER',
+                        passwordVariable: 'GH_TOKEN'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+
+                        PR_NUMBER=$(cat "$WORKSPACE/pr-number.txt")
+                        PAYLOAD='{"merge_method":"squash","commit_title":"Bash validation and artifact packaging"}'
+
+                        RESPONSE=$(curl --fail --silent --show-error \
+                            -X PUT \
+                            -H "Authorization: Bearer $GH_TOKEN" \
+                            -H "Accept: application/vnd.github+json" \
+                            -H "Content-Type: application/json" \
+                            -d "$PAYLOAD" \
+                            "$GITHUB_API/repos/$GITHUB_REPO/pulls/$PR_NUMBER/merge")
+
+                        printf '%s' "$RESPONSE" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+if not data.get("merged"):
+    raise SystemExit("GitHub did not confirm the PR merge.")
 print("GitHub confirmed the PR merge.")
 '
-
-                            echo "PR #$PR_NUMBER merged successfully."
-                        '''
-                    }
+                    '''
                 }
             }
         }
@@ -275,15 +255,15 @@ print("GitHub confirmed the PR merge.")
 
     post {
         success {
-            echo 'SUCCESS: Validation, artifact packaging, and PR merge completed.'
+            echo 'SUCCESS: Validation, artifact packaging, Nexus upload, and PR merge completed.'
         }
 
         failure {
-            echo 'ERROR: Pipeline failed. Check the stage output.'
+            echo 'FAILED: Check Console Output for the failed stage.'
         }
 
         always {
-            echo 'Bash validation pipeline finished.'
+            echo 'Jenkins pipeline finished.'
         }
     }
 }
