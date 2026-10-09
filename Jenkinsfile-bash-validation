@@ -7,11 +7,11 @@ pipeline {
     }
 
     environment {
-        REPO_OWNER   = 'chvkarthik-87'
-        REPO_NAME    = 'jenkins-config-automation'
+        REPO_OWNER    = 'chvkarthik-87'
+        REPO_NAME     = 'jenkins-config-automation'
         SOURCE_BRANCH = 'feature/config-update'
         TARGET_BRANCH = 'main'
-        GITHUB_API   = 'https://api.github.com/repos/chvkarthik-87/jenkins-config-automation'
+        GITHUB_API    = 'https://api.github.com/repos/chvkarthik-87/jenkins-config-automation'
     }
 
     stages {
@@ -20,9 +20,69 @@ pipeline {
             steps {
                 dir('source') {
                     deleteDir()
-
                     git branch: 'feature/config-update',
                         url: 'https://github.com/chvkarthik-87/jenkins-config-automation.git'
+                }
+            }
+        }
+
+        stage('Sync Main and Auto-Resolve Known Conflict') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'github-jenkins-token',
+                        usernameVariable: 'GH_USER',
+                        passwordVariable: 'GH_TOKEN'
+                    )
+                ]) {
+                    dir('source') {
+                        sh '''
+                            set -eu
+
+                            git config user.name "Jenkins Automation"
+                            git config user.email "jenkins-automation@users.noreply.github.com"
+
+                            echo "Fetching latest main and feature branches..."
+
+                            git fetch origin \
+                              "+refs/heads/main:refs/remotes/origin/main" \
+                              "+refs/heads/feature/config-update:refs/remotes/origin/feature/config-update"
+
+                            git checkout feature/config-update
+                            git reset --hard origin/feature/config-update
+
+                            echo "Merging main into feature branch..."
+
+                            if git merge --no-edit origin/main; then
+                                echo "Main merged without conflicts."
+                            else
+                                CONFLICTS=$(git diff --name-only --diff-filter=U)
+
+                                if [ "$CONFLICTS" = "Jenkinsfile-bash-validation" ]; then
+                                    echo "Known conflict detected."
+                                    echo "Keeping feature branch version of Jenkinsfile-bash-validation."
+
+                                    git checkout --ours -- Jenkinsfile-bash-validation
+                                    git add Jenkinsfile-bash-validation
+                                    git commit --no-edit
+                                else
+                                    echo "ERROR: Unexpected conflict detected:"
+                                    printf '%s\\n' "$CONFLICTS"
+                                    git merge --abort || true
+                                    exit 1
+                                fi
+                            fi
+
+                            echo "Pushing synchronized feature branch..."
+
+                            AUTH=$(printf '%s' "$GH_USER:$GH_TOKEN" | base64 | tr -d '\\n')
+
+                            git -c http.extraheader="AUTHORIZATION: basic $AUTH" \
+                                push origin HEAD:feature/config-update
+
+                            echo "Feature branch synchronized successfully."
+                        '''
+                    }
                 }
             }
         }
@@ -33,15 +93,12 @@ pipeline {
                     sh '''
                         set -eu
 
-                        echo "Checking deploy.sh..."
-
-                        if [ ! -f deploy.sh ]; then
+                        test -f deploy.sh || {
                             echo "ERROR: deploy.sh not found"
                             exit 1
-                        fi
+                        }
 
                         bash -n deploy.sh
-
                         echo "Bash syntax validation passed."
                     '''
                 }
@@ -54,15 +111,12 @@ pipeline {
                     sh '''
                         set -eu
 
-                        if ! command -v shfmt >/dev/null 2>&1; then
+                        command -v shfmt >/dev/null 2>&1 || {
                             echo "ERROR: shfmt is not installed."
                             exit 1
-                        fi
-
-                        echo "Checking deploy.sh formatting..."
+                        }
 
                         shfmt -d deploy.sh
-
                         echo "Bash formatting validation passed."
                     '''
                 }
@@ -80,7 +134,6 @@ pipeline {
                         ARTIFACT="artifacts/deploy-script-${BUILD_NUMBER}.tar.gz"
 
                         tar -czf "$ARTIFACT" deploy.sh
-
                         sha256sum "$ARTIFACT" > "${ARTIFACT}.sha256"
 
                         echo "Artifact created successfully:"
@@ -108,8 +161,6 @@ pipeline {
                         sh '''
                             set -eu
 
-                            echo "Searching for an open PR..."
-
                             curl -fsS \
                                 -H "Accept: application/vnd.github+json" \
                                 -H "Authorization: Bearer $GH_TOKEN" \
@@ -121,12 +172,10 @@ pipeline {
                                 'import json; p=json.load(open("open_prs.json")); print(p[0]["number"] if p else "")')
 
                             if [ -z "$PR_NUMBER" ]; then
-                                echo "Creating a new PR..."
-
                                 cat > pr_payload.json <<'JSON'
 {
   "title": "Bash validation and artifact packaging",
-  "body": "Jenkins validates Bash syntax and formatting, packages deploy.sh, archives the artifact, and then merges the pull request.",
+  "body": "Jenkins validates Bash syntax and formatting, packages deploy.sh, archives the artifact, and merges the pull request.",
   "head": "feature/config-update",
   "base": "main"
 }
@@ -180,12 +229,10 @@ JSON
                         sh '''
                             set -eu
 
-                            if [ -z "${PR_NUMBER:-}" ]; then
+                            test -n "${PR_NUMBER:-}" || {
                                 echo "ERROR: PR number is missing."
                                 exit 1
-                            fi
-
-                            echo "Merging PR #$PR_NUMBER..."
+                            }
 
                             cat > merge_payload.json <<'JSON'
 {
@@ -213,7 +260,6 @@ JSON
 import json, sys
 data = json.load(open("merge_response.json"))
 if data.get("merged") is not True:
-    print("GitHub did not confirm the merge.")
     print(json.dumps(data, indent=2))
     sys.exit(1)
 print("GitHub confirmed the PR merge.")
@@ -229,7 +275,7 @@ print("GitHub confirmed the PR merge.")
 
     post {
         success {
-            echo 'SUCCESS: Bash validation, artifact packaging, and PR merge completed.'
+            echo 'SUCCESS: Validation, artifact packaging, and PR merge completed.'
         }
 
         failure {
