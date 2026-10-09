@@ -2,12 +2,12 @@ pipeline {
     agent any
 
     tools {
-        maven 'Maven'
+        maven 'Maven-3'
     }
 
     environment {
         GITHUB_REPO = 'https://github.com/chvkarthik-87/jenkins-config-automation.git'
-        GITHUB_API  = 'https://api.github.com/repos/chvkarthik-87/jenkins-config-automation'
+        GITHUB_API = 'https://api.github.com/repos/chvkarthik-87/jenkins-config-automation'
 
         SONAR_SERVER = 'SonarQube-Server'
         SONAR_SCANNER = 'SonarQube-Scanner'
@@ -35,11 +35,14 @@ pipeline {
         stage('Read Current Version') {
             steps {
                 script {
-                    def envName = params.ENVIRONMENT ?: 'dev'
-                    def fileName = "environment/${envName}.json"
+                    env.SELECTED_ENV = params.ENVIRONMENT.toString()
+                    env.SELECTED_NODE = params.NODE.toString()
+                    env.NEW_VERSION = params.ENV_VERSION.toString()
+
+                    def envFile = "environment/${env.SELECTED_ENV}.json"
 
                     def jsonText = sh(
-                        script: "git show origin/main:${fileName}",
+                        script: "git show origin/main:${envFile}",
                         returnStdout: true
                     ).trim()
 
@@ -47,24 +50,19 @@ pipeline {
                         .parseText(jsonText)
 
                     env.OLD_VERSION = config.version.toString()
-                    env.NEW_VERSION = params.ENV_VERSION.toString()
-                    env.SELECTED_ENV = envName
-                    env.SELECTED_NODE = params.NODE.toString()
 
                     echo "Environment: ${env.SELECTED_ENV}"
                     echo "Node: ${env.SELECTED_NODE}"
                     echo "Current version: ${env.OLD_VERSION}"
                     echo "New version: ${env.NEW_VERSION}"
 
-                    if (params.CURRENT_VERSION &&
-                        params.CURRENT_VERSION != env.OLD_VERSION) {
-                        error(
-                            "Version changed in main. Refresh Build with Parameters and try again."
-                        )
+                    if (!env.NEW_VERSION?.trim()) {
+                        error('ENV_VERSION cannot be empty.')
                     }
 
-                    if (!env.NEW_VERSION?.trim()) {
-                        error('Enter ENV_VERSION.')
+                    if (params.CURRENT_VERSION &&
+                        params.CURRENT_VERSION.toString() != env.OLD_VERSION) {
+                        error('Current version changed. Refresh Build with Parameters and try again.')
                     }
                 }
             }
@@ -76,9 +74,7 @@ pipeline {
                     env.FEATURE_BRANCH =
                         "feature/config-${env.SELECTED_ENV}-${env.SELECTED_NODE}-${env.BUILD_NUMBER}"
 
-                    sh '''
-                        git checkout -B "$FEATURE_BRANCH" origin/main
-                    '''
+                    sh 'git checkout -B "$FEATURE_BRANCH" origin/main'
                 }
             }
         }
@@ -128,11 +124,11 @@ pipeline {
         stage('SonarQube Analysis') {
             steps {
                 script {
-                    def scannerHome = tool env.SONAR_SCANNER
+                    def scannerHome = tool 'SonarQube-Scanner'
 
-                    withSonarQubeEnv(env.SONAR_SERVER) {
+                    withSonarQubeEnv('SonarQube-Server') {
                         sh """
-                            ${scannerHome}/bin/sonar-scanner \
+                            "\${scannerHome}/bin/sonar-scanner" \
                               -Dsonar.projectKey=jenkins-config-automation \
                               -Dsonar.projectName=jenkins-config-automation \
                               -Dsonar.sources=environment,node \
@@ -149,7 +145,7 @@ pipeline {
                     if [ -f pom.xml ]; then
                         mvn -B clean package
                     else
-                        echo "No pom.xml found; skipping Maven compilation."
+                        echo "No pom.xml found; Maven compilation skipped."
                     fi
                 '''
             }
@@ -194,7 +190,7 @@ pipeline {
             }
         }
 
-        stage('Create Pull Request') {
+        stage('Create or Get Pull Request') {
             steps {
                 withCredentials([
                     usernamePassword(
@@ -204,7 +200,7 @@ pipeline {
                     )
                 ]) {
                     script {
-                        def prNumber = sh(
+                        def existingPr = sh(
                             script: '''
                                 set +x
                                 curl -fsS \
@@ -216,8 +212,22 @@ pipeline {
                             returnStdout: true
                         ).trim()
 
-                        if (!prNumber) {
-                            prNumber = sh(
+                        if (existingPr) {
+                            env.PR_NUMBER = existingPr
+                        } else {
+                            def payload = [
+                                title: "Update ${env.SELECTED_ENV}/${env.SELECTED_NODE} to ${env.NEW_VERSION}",
+                                head: env.FEATURE_BRANCH,
+                                base: 'main',
+                                body: "Automated configuration update from Jenkins build ${env.BUILD_NUMBER}."
+                            ]
+
+                            writeFile(
+                                file: 'pr-payload.json',
+                                text: groovy.json.JsonOutput.toJson(payload)
+                            )
+
+                            env.PR_NUMBER = sh(
                                 script: '''
                                     set +x
                                     curl -fsS -X POST \
@@ -225,15 +235,14 @@ pipeline {
                                       -H "Accept: application/vnd.github+json" \
                                       -H "Content-Type: application/json" \
                                       "$GITHUB_API/pulls" \
-                                      -d "{\\"title\\":\\"Update ${SELECTED_ENV}/${SELECTED_NODE} to ${NEW_VERSION}\\",\\"head\\":\\"${FEATURE_BRANCH}\\",\\"base\\":\\"main\\",\\"body\\":\\"Automated configuration update from Jenkins build ${BUILD_NUMBER}.\\"}" \
+                                      --data-binary @pr-payload.json \
                                     | python3 -c "import json,sys; print(json.load(sys.stdin)['number'])"
                                 ''',
                                 returnStdout: true
                             ).trim()
                         }
 
-                        env.PR_NUMBER = prNumber
-                        echo "Pull request number: ${env.PR_NUMBER}"
+                        echo "Pull request: #${env.PR_NUMBER}"
                     }
                 }
             }
@@ -250,7 +259,6 @@ pipeline {
                 ]) {
                     sh '''
                         set +x
-
                         curl -fsS -X PUT \
                           -H "Authorization: Bearer $GITHUB_TOKEN" \
                           -H "Accept: application/vnd.github+json" \
@@ -268,8 +276,11 @@ pipeline {
                     git fetch origin main
                     git checkout -B verify-main origin/main
 
-                    echo "Version after merge:"
+                    echo "Updated environment configuration:"
                     git show "origin/main:environment/${SELECTED_ENV}.json"
+
+                    echo "Updated node configuration:"
+                    git show "origin/main:node/${SELECTED_NODE}.json"
                 '''
             }
         }
@@ -310,7 +321,8 @@ pipeline {
                     sh '''
                         set +x
 
-                        curl -fsS -u "$NEXUS_USER:$NEXUS_PASSWORD" \
+                        curl -fsS \
+                          -u "$NEXUS_USER:$NEXUS_PASSWORD" \
                           -X POST \
                           "$NEXUS_URL/service/rest/v1/components?repository=$NEXUS_REPOSITORY" \
                           -F "maven2.groupId=$GROUP_ID" \
@@ -330,15 +342,15 @@ pipeline {
             echo "SUCCESS: ${env.OLD_VERSION} -> ${env.NEW_VERSION}"
             echo "Environment: ${env.SELECTED_ENV}"
             echo "Node: ${env.SELECTED_NODE}"
-            echo "Configuration merged to main and artifact uploaded to Nexus."
+            echo 'GitHub merge, configuration artifact and Nexus upload completed.'
         }
 
         failure {
-            echo 'Pipeline failed. Check Console Output for the failed stage.'
+            echo 'Pipeline failed. Check the Console Output for the exact failing stage.'
         }
 
         always {
-            echo "Build completed: ${currentBuild.currentResult}"
+            echo "Build result: ${currentBuild.currentResult}"
         }
     }
 }
