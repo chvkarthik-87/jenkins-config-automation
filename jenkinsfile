@@ -12,48 +12,42 @@ pipeline {
 
     environment {
         GITHUB_REPO = 'chvkarthik-87/jenkins-config-automation'
-        GITHUB_URL  = 'https://github.com/chvkarthik-87/jenkins-config-automation.git'
-        GITHUB_API  = 'https://api.github.com'
-        NEXUS_URL   = 'http://172.31.36.177:8081'
-        NEXUS_REPO  = 'maven-releases'
-        SONAR_NAME  = 'SonarQube-Server'
+        GITHUB_URL = 'https://github.com/chvkarthik-87/jenkins-config-automation.git'
+        GITHUB_API = 'https://api.github.com'
+        NEXUS_URL = 'http://172.31.36.177:8081'
+        NEXUS_REPO = 'maven-releases'
+        SONAR_NAME = 'SonarQube-Server'
     }
 
     stages {
-
         stage('Validate Parameters') {
             steps {
                 script {
-                    def required = [
-                        'ENVIRONMENT',
-                        'NODE',
-                        'ENV_VERSION'
-                    ]
-
-                    required.each { key ->
-                        if (!params[key]?.toString()?.trim()) {
-                            error("Missing required parameter: ${key}")
-                        }
+                    if (!(params.ENVIRONMENT in ['dev', 'stage', 'uat', 'prod'])) {
+                        error('Select a valid ENVIRONMENT.')
                     }
 
-                    if (!(params.ENVIRONMENT in
-                        ['dev', 'stage', 'uat', 'prod'])) {
-                        error('Invalid ENVIRONMENT selected.')
+                    if (!(params.NODE in ['dev', 'stage', 'uat', 'prod'])) {
+                        error('Select a valid NODE.')
                     }
 
-                    if (!(params.NODE in
-                        ['dev', 'stage', 'uat', 'prod'])) {
-                        error('Invalid NODE selected.')
+                    if (!params.ENV_VERSION?.trim()) {
+                        error('Enter the new version in ENV_VERSION.')
                     }
 
-                    if (!(params.ENV_VERSION ==~
-                        /\d+\.\d+\.\d+/)) {
-                        error('ENV_VERSION must use X.Y.Z format, e.g. 2.0.4')
+                    def versionParts = params.ENV_VERSION.trim().split('\\.')
+
+                    if (versionParts.size() != 3 ||
+                        !versionParts.every { it ==~ '[0-9]+' }) {
+                        error('Version must use X.Y.Z format, for example 2.0.4.')
                     }
+
+                    env.FEATURE_BRANCH =
+                        "feature/config-${params.ENVIRONMENT}-${params.NODE}-${env.BUILD_NUMBER}"
 
                     echo "Environment: ${params.ENVIRONMENT}"
                     echo "Node: ${params.NODE}"
-                    echo "Requested new version: ${params.ENV_VERSION}"
+                    echo "New version requested: ${params.ENV_VERSION}"
                 }
             }
         }
@@ -61,99 +55,66 @@ pipeline {
         stage('Checkout Main') {
             steps {
                 deleteDir()
-
                 git branch: 'main',
                     credentialsId: 'github-jenkins-token',
                     url: "${GITHUB_URL}"
 
-                sh '''
-                    git checkout main
-                    git pull origin main
-                    git status
-                '''
+                sh 'git checkout main'
             }
         }
 
         stage('Read Current Configuration') {
             steps {
                 script {
-                    def envFile =
-                        "environment/${params.ENVIRONMENT}.json"
-
-                    def nodeFile =
-                        "node/${params.NODE}.json"
+                    def envFile = "environment/${params.ENVIRONMENT}.json"
+                    def nodeFile = "node/${params.NODE}.json"
 
                     if (!fileExists(envFile)) {
-                        error("File not found: ${envFile}")
+                        error("Missing file: ${envFile}")
                     }
 
                     if (!fileExists(nodeFile)) {
-                        error("File not found: ${nodeFile}")
+                        error("Missing file: ${nodeFile}")
                     }
 
                     def envConfig = readJSON file: envFile
                     def nodeConfig = readJSON file: nodeFile
 
-                    env.OLD_VERSION =
-                        envConfig.version?.toString() ?: ''
+                    env.OLD_VERSION = envConfig.version?.toString() ?: ''
+                    env.OLD_APPNAME = envConfig.appName?.toString() ?: ''
+                    env.OLD_REPLICAS = envConfig.replicas?.toString() ?: ''
+                    env.OLD_LOGLEVEL = envConfig.logLevel?.toString() ?: ''
+                    env.OLD_NODE_NAME = nodeConfig.name?.toString() ?: ''
+                    env.OLD_NODE_TYPE = nodeConfig.type?.toString() ?: ''
+                    env.OLD_NODE_REGION = nodeConfig.region?.toString() ?: ''
+                    env.OLD_NODE_AZ = nodeConfig.availabilityZone?.toString() ?: ''
 
-                    env.OLD_APPNAME =
-                        envConfig.appName?.toString() ?: ''
-
-                    env.OLD_REPLICAS =
-                        envConfig.replicas?.toString() ?: '1'
-
-                    env.OLD_LOGLEVEL =
-                        envConfig.logLevel?.toString() ?: 'INFO'
-
-                    env.OLD_NODE_NAME =
-                        nodeConfig.name?.toString() ?: ''
-
-                    env.OLD_NODE_TYPE =
-                        nodeConfig.type?.toString() ?: ''
-
-                    env.OLD_NODE_REGION =
-                        nodeConfig.region?.toString() ?: ''
-
-                    env.OLD_NODE_AZ =
-                        nodeConfig.availabilityZone?.toString() ?: ''
-
-                    echo '========== CURRENT CONFIGURATION =========='
+                    echo '===== CURRENT VALUES FROM JSON ====='
                     echo "Environment: ${params.ENVIRONMENT}"
                     echo "Current version: ${env.OLD_VERSION}"
-                    echo "Application name: ${env.OLD_APPNAME}"
+                    echo "App name: ${env.OLD_APPNAME}"
                     echo "Replicas: ${env.OLD_REPLICAS}"
                     echo "Log level: ${env.OLD_LOGLEVEL}"
                     echo "Node name: ${env.OLD_NODE_NAME}"
                     echo "Node type: ${env.OLD_NODE_TYPE}"
                     echo "Node region: ${env.OLD_NODE_REGION}"
                     echo "Node AZ: ${env.OLD_NODE_AZ}"
-                    echo "Requested version: ${params.ENV_VERSION}"
-                    echo '============================================'
+                    echo "New version: ${params.ENV_VERSION}"
+                    echo '===================================='
 
-                    if (!(env.OLD_VERSION ==~ /\d+\.\d+\.\d+/)) {
-                        error(
-                            "Current version '${env.OLD_VERSION}' " +
-                            'must use X.Y.Z format.'
-                        )
+                    if (!(env.OLD_VERSION ==~ '[0-9]+\\.[0-9]+\\.[0-9]+')) {
+                        error("Current version '${env.OLD_VERSION}' is not in X.Y.Z format.")
                     }
 
-                    def oldParts = env.OLD_VERSION
-                        .split('\\.')
-                        .collect { it.toBigInteger() }
-
-                    def newParts = params.ENV_VERSION
-                        .split('\\.')
-                        .collect { it.toBigInteger() }
+                    def oldParts = env.OLD_VERSION.split('\\.').collect { it.toBigInteger() }
+                    def newParts = params.ENV_VERSION.trim().split('\\.').collect { it.toBigInteger() }
 
                     int comparison = 0
-
                     for (int i = 0; i < 3; i++) {
                         if (newParts[i] > oldParts[i]) {
                             comparison = 1
                             break
                         }
-
                         if (newParts[i] < oldParts[i]) {
                             comparison = -1
                             break
@@ -161,11 +122,11 @@ pipeline {
                     }
 
                     if (comparison == 0) {
-                        error('New version must differ from current version.')
+                        error('New version is the same as the current version.')
                     }
 
                     if (comparison < 0) {
-                        error('Downgrading the version is not allowed.')
+                        error('Version downgrade is not allowed.')
                     }
                 }
             }
@@ -174,11 +135,8 @@ pipeline {
         stage('Update JSON Files') {
             steps {
                 script {
-                    def envFile =
-                        "environment/${params.ENVIRONMENT}.json"
-
-                    def nodeFile =
-                        "node/${params.NODE}.json"
+                    def envFile = "environment/${params.ENVIRONMENT}.json"
+                    def nodeFile = "node/${params.NODE}.json"
 
                     def envConfig = readJSON file: envFile
                     def nodeConfig = readJSON file: nodeFile
@@ -186,22 +144,18 @@ pipeline {
                     envConfig.version = params.ENV_VERSION.trim()
 
                     if (params.ENV_APPNAME?.trim()) {
-                        envConfig.appName =
-                            params.ENV_APPNAME.trim()
+                        envConfig.appName = params.ENV_APPNAME.trim()
                     }
 
                     if (params.ENV_REPLICAS?.trim()) {
-                        if (!(params.ENV_REPLICAS.trim() ==~ /\d+/)) {
+                        if (!(params.ENV_REPLICAS.trim() ==~ '[0-9]+')) {
                             error('ENV_REPLICAS must be a whole number.')
                         }
-
-                        envConfig.replicas =
-                            params.ENV_REPLICAS.trim().toInteger()
+                        envConfig.replicas = params.ENV_REPLICAS.trim().toInteger()
                     }
 
                     if (params.ENV_LOGLEVEL?.trim()) {
-                        envConfig.logLevel =
-                            params.ENV_LOGLEVEL.trim()
+                        envConfig.logLevel = params.ENV_LOGLEVEL.trim()
                     }
 
                     if (params.NODE_NAME?.trim()) {
@@ -217,19 +171,13 @@ pipeline {
                     }
 
                     if (params.NODE_AZ?.trim()) {
-                        nodeConfig.availabilityZone =
-                            params.NODE_AZ.trim()
+                        nodeConfig.availabilityZone = params.NODE_AZ.trim()
                     }
 
-                    writeJSON file: envFile,
-                        json: envConfig,
-                        pretty: 4
+                    writeJSON file: envFile, json: envConfig, pretty: 4
+                    writeJSON file: nodeFile, json: nodeConfig, pretty: 4
 
-                    writeJSON file: nodeFile,
-                        json: nodeConfig,
-                        pretty: 4
-
-                    echo 'Updated environment and node JSON files.'
+                    echo 'Environment and node JSON files updated.'
                 }
             }
         }
@@ -238,14 +186,8 @@ pipeline {
             steps {
                 sh '''
                     set -eu
-                    python3 -m json.tool \
-                      "environment/${ENVIRONMENT}.json" \
-                      > /dev/null
-
-                    python3 -m json.tool \
-                      "node/${NODE}.json" \
-                      > /dev/null
-
+                    python3 -m json.tool "environment/${ENVIRONMENT}.json" > /dev/null
+                    python3 -m json.tool "node/${NODE}.json" > /dev/null
                     echo "JSON validation successful."
                 '''
             }
@@ -254,8 +196,7 @@ pipeline {
         stage('SonarQube Analysis') {
             steps {
                 script {
-                    def scannerHome =
-                        tool 'SonarQube-Scanner'
+                    def scannerHome = tool 'SonarQube-Scanner'
 
                     withSonarQubeEnv("${SONAR_NAME}") {
                         sh """
@@ -273,16 +214,10 @@ pipeline {
 
         stage('Prepare Feature Branch') {
             steps {
-                script {
-                    env.FEATURE_BRANCH =
-                        "feature/config-${params.ENVIRONMENT}-${params.NODE}-${env.BUILD_NUMBER}"
-
-                    sh '''
-                        set -eu
-                        git checkout -b "$FEATURE_BRANCH"
-                        git status
-                    '''
-                }
+                sh '''
+                    set -eu
+                    git checkout -b "$FEATURE_BRANCH"
+                '''
             }
         }
 
@@ -290,16 +225,11 @@ pipeline {
             steps {
                 sh '''
                     set -eu
-
                     git config user.name "Jenkins Automation"
                     git config user.email "jenkins@example.com"
 
-                    git add \
-                      "environment/${ENVIRONMENT}.json" \
-                      "node/${NODE}.json"
-
-                    git commit -m \
-                      "Update ${ENVIRONMENT}/${NODE} to ${ENV_VERSION}"
+                    git add "environment/${ENVIRONMENT}.json" "node/${NODE}.json"
+                    git commit -m "Update ${ENVIRONMENT}/${NODE} to ${ENV_VERSION}"
                 '''
             }
         }
@@ -316,6 +246,7 @@ pipeline {
                     sh '''
                         set +x
                         set -eu
+                        trap 'rm -f "$WORKSPACE/git-askpass.sh"' EXIT
 
                         cat > "$WORKSPACE/git-askpass.sh" <<'ASKPASS'
 #!/bin/sh
@@ -327,13 +258,9 @@ esac
 ASKPASS
 
                         chmod 700 "$WORKSPACE/git-askpass.sh"
-
                         export GIT_ASKPASS="$WORKSPACE/git-askpass.sh"
                         export GIT_TERMINAL_PROMPT=0
-
                         git push origin "$FEATURE_BRANCH"
-
-                        rm -f "$WORKSPACE/git-askpass.sh"
                     '''
                 }
             }
@@ -349,33 +276,26 @@ ASKPASS
                     )
                 ]) {
                     script {
-                        def prBody = [
+                        def payload = [
                             title: "Update ${params.ENVIRONMENT}/${params.NODE} to ${params.ENV_VERSION}",
                             head: env.FEATURE_BRANCH,
                             base: 'main',
-                            body: """Automated configuration update.
-
-Environment: ${params.ENVIRONMENT}
-Node: ${params.NODE}
-Previous version: ${env.OLD_VERSION}
-New version: ${params.ENV_VERSION}
-Jenkins build: ${env.BUILD_NUMBER}
-"""
+                            body: "Automated Jenkins configuration update. Previous version: ${env.OLD_VERSION}. New version: ${params.ENV_VERSION}."
                         ]
 
                         writeFile(
                             file: 'pr-payload.json',
-                            text: JsonOutput.toJson(prBody)
+                            text: JsonOutput.toJson(payload)
                         )
 
-                        def response = sh(
+                        def status = sh(
                             script: '''
                                 set +x
-                                curl --fail-with-body -sS \
+                                curl -sS -o pr-response.json -w '%{http_code}' \
                                   -u "$GH_USER:$GH_TOKEN" \
-                                  -H "Accept: application/vnd.github+json" \
-                                  -H "X-GitHub-Api-Version: 2022-11-28" \
-                                  -H "Content-Type: application/json" \
+                                  -H 'Accept: application/vnd.github+json' \
+                                  -H 'X-GitHub-Api-Version: 2022-11-28' \
+                                  -H 'Content-Type: application/json' \
                                   -X POST \
                                   --data @pr-payload.json \
                                   "$GITHUB_API/repos/$GITHUB_REPO/pulls"
@@ -383,15 +303,15 @@ Jenkins build: ${env.BUILD_NUMBER}
                             returnStdout: true
                         ).trim()
 
-                        def pr = new JsonSlurperClassic()
-                            .parseText(response)
+                        def response = new JsonSlurperClassic()
+                            .parseText(readFile('pr-response.json'))
 
-                        if (!pr.number) {
-                            error("GitHub did not return a PR number: ${response}")
+                        if (status != '201' || !response.number) {
+                            error("Could not create PR. HTTP ${status}: ${readFile('pr-response.json')}")
                         }
 
-                        env.PR_NUMBER = pr.number.toString()
-                        env.PR_URL = pr.html_url?.toString() ?: ''
+                        env.PR_NUMBER = response.number.toString()
+                        env.PR_URL = response.html_url.toString()
 
                         echo "Pull request created: ${env.PR_URL}"
                     }
@@ -409,25 +329,24 @@ Jenkins build: ${env.BUILD_NUMBER}
                     )
                 ]) {
                     script {
-                        def mergePayload = [
-                            commit_title: "Merge PR #${env.PR_NUMBER}: update configuration",
-                            commit_message: "Automated configuration update from Jenkins build ${env.BUILD_NUMBER}",
+                        def payload = [
+                            commit_title: "Merge PR #${env.PR_NUMBER}",
                             merge_method: 'squash'
                         ]
 
                         writeFile(
                             file: 'merge-payload.json',
-                            text: JsonOutput.toJson(mergePayload)
+                            text: JsonOutput.toJson(payload)
                         )
 
-                        def response = sh(
+                        def status = sh(
                             script: '''
                                 set +x
-                                curl --fail-with-body -sS \
+                                curl -sS -o merge-response.json -w '%{http_code}' \
                                   -u "$GH_USER:$GH_TOKEN" \
-                                  -H "Accept: application/vnd.github+json" \
-                                  -H "X-GitHub-Api-Version: 2022-11-28" \
-                                  -H "Content-Type: application/json" \
+                                  -H 'Accept: application/vnd.github+json' \
+                                  -H 'X-GitHub-Api-Version: 2022-11-28' \
+                                  -H 'Content-Type: application/json' \
                                   -X PUT \
                                   --data @merge-payload.json \
                                   "$GITHUB_API/repos/$GITHUB_REPO/pulls/$PR_NUMBER/merge"
@@ -435,14 +354,14 @@ Jenkins build: ${env.BUILD_NUMBER}
                             returnStdout: true
                         ).trim()
 
-                        def mergeResult = new JsonSlurperClassic()
-                            .parseText(response)
+                        def response = new JsonSlurperClassic()
+                            .parseText(readFile('merge-response.json'))
 
-                        if (mergeResult.merged != true) {
-                            error("GitHub could not merge PR: ${response}")
+                        if (status != '200' || response.merged != true) {
+                            error("Could not merge PR. HTTP ${status}: ${readFile('merge-response.json')}")
                         }
 
-                        echo "PR #${env.PR_NUMBER} merged successfully."
+                        echo "Pull request #${env.PR_NUMBER} merged successfully."
                     }
                 }
             }
@@ -460,6 +379,7 @@ Jenkins build: ${env.BUILD_NUMBER}
                     sh '''
                         set +x
                         set -eu
+                        trap 'rm -f "$WORKSPACE/git-askpass.sh"' EXIT
 
                         cat > "$WORKSPACE/git-askpass.sh" <<'ASKPASS'
 #!/bin/sh
@@ -477,13 +397,11 @@ ASKPASS
                         git fetch origin main
                         git checkout -B main origin/main
 
-                        echo "Environment JSON:"
+                        echo "Verified environment JSON:"
                         cat "environment/${ENVIRONMENT}.json"
 
-                        echo "Node JSON:"
+                        echo "Verified node JSON:"
                         cat "node/${NODE}.json"
-
-                        rm -f "$WORKSPACE/git-askpass.sh"
                     '''
                 }
             }
@@ -493,7 +411,6 @@ ASKPASS
             steps {
                 sh '''
                     set -eu
-
                     mkdir -p build-artifact
 
                     tar -czf \
@@ -530,9 +447,11 @@ ASKPASS
                           -u "$NEXUS_USER:$NEXUS_PASSWORD" \
                           -X POST \
                           "$NEXUS_URL/service/rest/v1/components?repository=$NEXUS_REPO" \
-                          -F "raw.directory=config/${ENVIRONMENT}/${NODE}" \
-                          -F "raw.asset1=@${ARTIFACT}" \
-                          -F "raw.asset1.filename=$(basename "$ARTIFACT")"
+                          -F "maven2.groupId=com.chvkarthik.config" \
+                          -F "maven2.artifactId=config-${ENVIRONMENT}-${NODE}" \
+                          -F "maven2.version=${ENV_VERSION}" \
+                          -F "maven2.asset1=@${ARTIFACT}" \
+                          -F "maven2.asset1.extension=tar.gz"
 
                         echo "Artifact uploaded to Nexus."
                     '''
@@ -544,8 +463,8 @@ ASKPASS
     post {
         success {
             echo """
-            ==========================================
-            PIPELINE COMPLETED SUCCESSFULLY
+            ======================================
+            PIPELINE SUCCESS
 
             Environment : ${params.ENVIRONMENT}
             Node        : ${params.NODE}
@@ -554,7 +473,7 @@ ASKPASS
             PR number   : ${env.PR_NUMBER}
             PR URL      : ${env.PR_URL}
 
-            ==========================================
+            ======================================
             """
         }
 
