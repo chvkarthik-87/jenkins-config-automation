@@ -12,7 +12,7 @@ pipeline {
         FEATURE_BRANCH = 'feature/config-update'
         MAIN_BRANCH = 'main'
 
-        NEXUS_URL = 'http://YOUR-NEXUS-IP:8081'
+        NEXUS_URL = 'http://98.83.162.0:8081'
         NEXUS_REPOSITORY = 'deploy-artifacts'
     }
 
@@ -21,7 +21,6 @@ pipeline {
             steps {
                 dir('source') {
                     deleteDir()
-
                     git branch: 'feature/config-update',
                         url: 'https://github.com/chvkarthik-87/jenkins-config-automation.git'
                 }
@@ -53,12 +52,11 @@ pipeline {
                             CONFLICTS=$(git diff --name-only --diff-filter=U)
 
                             if [ "$CONFLICTS" = "Jenkinsfile-bash-validation" ]; then
-                                echo "Resolving the known Jenkinsfile conflict using feature branch version."
                                 git checkout --ours -- Jenkinsfile-bash-validation
                                 git add Jenkinsfile-bash-validation
                                 git commit --no-edit
                             else
-                                echo "Unexpected conflict. Stopping safely:"
+                                echo "Unexpected conflict; stopping safely."
                                 printf '%s\\n' "$CONFLICTS"
                                 git merge --abort || true
                                 exit 1
@@ -111,14 +109,12 @@ pipeline {
             steps {
                 sh '''
                     set -eu
-
                     mkdir -p source/artifacts
 
                     tar -czf "source/artifacts/deploy-script-${BUILD_NUMBER}.tar.gz" \
                         -C source deploy.sh
 
                     cd source/artifacts
-
                     sha256sum "deploy-script-${BUILD_NUMBER}.tar.gz" \
                         > "deploy-script-${BUILD_NUMBER}.tar.gz.sha256"
 
@@ -181,7 +177,7 @@ pipeline {
                         RESPONSE=$(curl --fail --silent --show-error \
                             -H "Authorization: Bearer $GH_TOKEN" \
                             -H "Accept: application/vnd.github+json" \
-                            "$GITHUB_API/repos/$GITHUB_REPO/pulls?state=open&head=$GITHUB_REPO_OWNER:$FEATURE_BRANCH&base=$MAIN_BRANCH")
+                            "$GITHUB_API/repos/$GITHUB_REPO/pulls?state=open&head=chvkarthik-87:$FEATURE_BRANCH&base=$MAIN_BRANCH")
 
                         PR_NUMBER=$(printf '%s' "$RESPONSE" | python3 -c '
 import json, sys
@@ -196,7 +192,7 @@ print(json.dumps({
     "title": "Bash validation and artifact packaging",
     "head": os.environ["FEATURE_BRANCH"],
     "base": os.environ["MAIN_BRANCH"],
-    "body": "Jenkins validates Bash syntax and formatting, packages deploy.sh, uploads artifacts to Nexus, and merges the pull request."
+    "body": "Jenkins validates deploy.sh, packages the artifact, and uploads it to Nexus."
 }))
 ')
 
@@ -234,7 +230,6 @@ print(json.load(sys.stdin)["number"])
                         set -eu
 
                         PR_NUMBER=$(cat "$WORKSPACE/pr-number.txt")
-
                         PAYLOAD='{"merge_method":"squash","commit_title":"Bash validation and artifact packaging"}'
 
                         RESPONSE=$(curl --fail --silent --show-error \
@@ -264,7 +259,7 @@ print("GitHub confirmed the PR merge.")
         }
 
         failure {
-            echo 'FAILED: Check Console Output to identify the failed stage.'
+            echo 'FAILED: Check Console Output for the failed stage.'
         }
 
         always {
