@@ -28,6 +28,7 @@ pipeline {
         GITHUB_API = 'https://api.github.com/repos/chvkarthik-87/jenkins-config-automation'
         REPO_URL = 'https://github.com/chvkarthik-87/jenkins-config-automation.git'
         FEATURE_BRANCH = 'feature/config-update'
+
         NEXUS_URL = 'http://98.83.162.0:8081'
         NEXUS_REPOSITORY = 'maven-releases'
         GROUP_ID = 'com.chvkarthik.config'
@@ -38,12 +39,14 @@ pipeline {
         stage('Checkout') {
             steps {
                 deleteDir()
+
                 git branch: 'main', url: "${REPO_URL}"
 
                 sh '''
                     set -eu
                     git config user.name "Jenkins"
                     git config user.email "jenkins@example.com"
+
                     git fetch origin main
                     git fetch origin feature/config-update
                 '''
@@ -63,7 +66,8 @@ pipeline {
                         set -eu
                         set +x
 
-                        AUTH=$(printf '%s' "$GITHUB_USER:$GITHUB_TOKEN" | base64 | tr -d '\\n')
+                        AUTH=$(printf '%s' "$GITHUB_USER:$GITHUB_TOKEN" |
+                            base64 | tr -d '\\n')
 
                         git -c http.extraheader="AUTHORIZATION: basic $AUTH" \
                             fetch origin feature/config-update
@@ -74,6 +78,7 @@ pipeline {
                         git config user.name "Jenkins"
                         git config user.email "jenkins@example.com"
 
+                        echo "Using existing branch: feature/config-update"
                         git status --short
                     '''
                 }
@@ -107,10 +112,10 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
-                    echo "Selected environment: ${env.SELECTED_ENV}"
-                    echo "Selected node: ${env.SELECTED_NODE}"
-                    echo "Existing version: ${env.OLD_VERSION}"
-                    echo "New version entered: ${env.NEW_VERSION}"
+                    echo "Environment: ${env.SELECTED_ENV}"
+                    echo "Node: ${env.SELECTED_NODE}"
+                    echo "Old version: ${env.OLD_VERSION}"
+                    echo "New version: ${env.NEW_VERSION}"
                 }
             }
         }
@@ -153,19 +158,28 @@ env_data["replicas"] = replicas
 env_data["logLevel"] = os.environ["APP_LOGLEVEL"]
 
 with open(env_file, "w", encoding="utf-8") as f:
-    json.dump(env_data, f, indent=2)
+    json.dump(env_data, f, indent=4)
     f.write("\\n")
 
 with open(node_file, encoding="utf-8") as f:
     node_data = json.load(f)
 
-node_data["name"] = os.environ["CONFIG_NODE_NAME"]
-node_data["type"] = os.environ["CONFIG_NODE_TYPE"]
+# Update existing keys without replacing the whole JSON structure.
+if "nodeName" in node_data:
+    node_data["nodeName"] = os.environ["CONFIG_NODE_NAME"]
+if "name" in node_data:
+    node_data["name"] = os.environ["CONFIG_NODE_NAME"]
+
+if "nodeType" in node_data:
+    node_data["nodeType"] = os.environ["CONFIG_NODE_TYPE"]
+if "type" in node_data:
+    node_data["type"] = os.environ["CONFIG_NODE_TYPE"]
+
 node_data["region"] = os.environ["CONFIG_NODE_REGION"]
 node_data["availabilityZone"] = os.environ["CONFIG_NODE_AZ"]
 
 with open(node_file, "w", encoding="utf-8") as f:
-    json.dump(node_data, f, indent=2)
+    json.dump(node_data, f, indent=4)
     f.write("\\n")
 
 print("Updated:", env_file)
@@ -251,7 +265,8 @@ PY
                         set -eu
                         set +x
 
-                        AUTH=$(printf '%s' "$GITHUB_USER:$GITHUB_TOKEN" | base64 | tr -d '\\n')
+                        AUTH=$(printf '%s' "$GITHUB_USER:$GITHUB_TOKEN" |
+                            base64 | tr -d '\\n')
 
                         git -c http.extraheader="AUTHORIZATION: basic $AUTH" \
                             push origin HEAD:refs/heads/feature/config-update
@@ -278,6 +293,7 @@ PY
                                 curl -fsS -G \
                                   -H "Authorization: Bearer $GITHUB_TOKEN" \
                                   -H "Accept: application/vnd.github+json" \
+                                  -H "X-GitHub-Api-Version: 2022-11-28" \
                                   --data-urlencode "state=open" \
                                   --data-urlencode "head=chvkarthik-87:feature/config-update" \
                                   --data-urlencode "base=main" \
@@ -306,6 +322,7 @@ PY
                                     curl -fsS -X POST \
                                       -H "Authorization: Bearer $GITHUB_TOKEN" \
                                       -H "Accept: application/vnd.github+json" \
+                                      -H "X-GitHub-Api-Version: 2022-11-28" \
                                       -H "Content-Type: application/json" \
                                       "$GITHUB_API/pulls" \
                                       --data-binary @pr-payload.json |
@@ -334,12 +351,97 @@ PY
                         set -eu
                         set +x
 
-                        curl -fsS -X PUT \
-                          -H "Authorization: Bearer $GITHUB_TOKEN" \
-                          -H "Accept: application/vnd.github+json" \
-                          -H "Content-Type: application/json" \
-                          "$GITHUB_API/pulls/$PR_NUMBER/merge" \
-                          -d '{"merge_method":"squash"}'
+                        API="$GITHUB_API/pulls/$PR_NUMBER"
+
+                        echo "Checking PR #$PR_NUMBER"
+
+                        PR_JSON=$(curl -fsS \
+                            -H "Authorization: Bearer $GITHUB_TOKEN" \
+                            -H "Accept: application/vnd.github+json" \
+                            -H "X-GitHub-Api-Version: 2022-11-28" \
+                            "$API")
+
+                        printf '%s' "$PR_JSON" | python3 -c '
+import json, sys
+p = json.load(sys.stdin)
+print("PR state:", p.get("state"))
+print("Already merged:", p.get("merged"))
+print("Draft:", p.get("draft"))
+print("Mergeable:", p.get("mergeable"))
+print("Mergeable state:", p.get("mergeable_state"))
+print("Head:", p.get("head", {}).get("ref"))
+print("Base:", p.get("base", {}).get("ref"))
+'
+
+                        STATE=$(printf '%s' "$PR_JSON" |
+                            python3 -c 'import json,sys; print(json.load(sys.stdin).get("state",""))')
+
+                        MERGED=$(printf '%s' "$PR_JSON" |
+                            python3 -c 'import json,sys; print(str(json.load(sys.stdin).get("merged",False)).lower())')
+
+                        DRAFT=$(printf '%s' "$PR_JSON" |
+                            python3 -c 'import json,sys; print(str(json.load(sys.stdin).get("draft",False)).lower())')
+
+                        MERGEABLE=$(printf '%s' "$PR_JSON" |
+                            python3 -c 'import json,sys; v=json.load(sys.stdin).get("mergeable"); print("null" if v is None else str(v).lower())')
+
+                        if [ "$MERGED" = "true" ]; then
+                            echo "Pull request is already merged."
+                            exit 0
+                        fi
+
+                        if [ "$STATE" != "open" ]; then
+                            echo "Pull request is not open. State: $STATE"
+                            exit 1
+                        fi
+
+                        if [ "$DRAFT" = "true" ]; then
+                            echo "Pull request is a draft. Mark it ready for review."
+                            exit 1
+                        fi
+
+                        if [ "$MERGEABLE" = "null" ]; then
+                            echo "GitHub has not finished calculating mergeability."
+                            echo "Wait briefly and rerun the build."
+                            exit 1
+                        fi
+
+                        if [ "$MERGEABLE" != "true" ]; then
+                            echo "Pull request has conflicts or is not mergeable."
+                            exit 1
+                        fi
+
+                        HTTP_CODE=$(curl -sS \
+                            -o merge-response.json \
+                            -w '%{http_code}' \
+                            -X PUT \
+                            -H "Authorization: Bearer $GITHUB_TOKEN" \
+                            -H "Accept: application/vnd.github+json" \
+                            -H "X-GitHub-Api-Version: 2022-11-28" \
+                            -H "Content-Type: application/json" \
+                            "$API/merge" \
+                            -d '{"merge_method":"squash"}')
+
+                        echo "GitHub merge response:"
+                        cat merge-response.json
+                        echo
+                        echo "HTTP status: $HTTP_CODE"
+
+                        if [ "$HTTP_CODE" != "200" ]; then
+                            echo "Automatic merge was not successful."
+                            echo "Check GitHub branch protection, required checks, and token permissions."
+                            exit 1
+                        fi
+
+                        python3 -c '
+import json
+with open("merge-response.json") as f:
+    data = json.load(f)
+if not data.get("merged"):
+    raise SystemExit("GitHub did not confirm a successful merge.")
+print("PR merged successfully.")
+print("Merge commit:", data.get("sha"))
+'
                     '''
                 }
             }
@@ -358,12 +460,16 @@ PY
                         set -eu
                         set +x
 
-                        AUTH=$(printf '%s' "$GITHUB_USER:$GITHUB_TOKEN" | base64 | tr -d '\\n')
+                        AUTH=$(printf '%s' "$GITHUB_USER:$GITHUB_TOKEN" |
+                            base64 | tr -d '\\n')
 
                         git -c http.extraheader="AUTHORIZATION: basic $AUTH" \
                             fetch origin main
 
+                        echo "Checking merged environment configuration:"
                         git show "origin/main:environment/${SELECTED_ENV}.json"
+
+                        echo "Checking merged node configuration:"
                         git show "origin/main:node/${SELECTED_NODE}.json"
                     '''
                 }
@@ -383,7 +489,8 @@ PY
                         set -eu
                         set +x
 
-                        AUTH=$(printf '%s' "$GITHUB_USER:$GITHUB_TOKEN" | base64 | tr -d '\\n')
+                        AUTH=$(printf '%s' "$GITHUB_USER:$GITHUB_TOKEN" |
+                            base64 | tr -d '\\n')
 
                         git -c http.extraheader="AUTHORIZATION: basic $AUTH" \
                             fetch origin main
@@ -402,7 +509,10 @@ PY
                     '''
                 }
 
-                archiveArtifacts artifacts: 'config-artifact.zip', fingerprint: true
+                archiveArtifacts(
+                    artifacts: 'config-artifact.zip',
+                    fingerprint: true
+                )
             }
         }
 
@@ -420,36 +530,3 @@ PY
                         set +x
 
                         curl -fsS \
-                          -u "$NEXUS_USER:$NEXUS_PASSWORD" \
-                          -X POST \
-                          "$NEXUS_URL/service/rest/v1/components?repository=$NEXUS_REPOSITORY" \
-                          -F "maven2.groupId=$GROUP_ID" \
-                          -F "maven2.artifactId=$ARTIFACT_ID" \
-                          -F "maven2.version=$NEW_VERSION" \
-                          -F "maven2.generate-pom=true" \
-                          -F "maven2.asset1=@config-artifact.zip" \
-                          -F "maven2.asset1.extension=zip"
-                    '''
-                }
-            }
-        }
-    }
-
-    post {
-        success {
-            echo "SUCCESS: ${env.OLD_VERSION} -> ${env.NEW_VERSION}"
-            echo "Environment: ${env.SELECTED_ENV}"
-            echo "Node: ${env.SELECTED_NODE}"
-            echo "Existing branch used: feature/config-update"
-            echo "Configuration merged and artifact uploaded."
-        }
-
-        failure {
-            echo "Pipeline failed. Check the first error in Console Output."
-        }
-
-        always {
-            echo "Build result: ${currentBuild.currentResult}"
-        }
-    }
-}
