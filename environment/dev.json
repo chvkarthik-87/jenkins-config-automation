@@ -1,8 +1,8 @@
 {
   "environment": "dev",
   "appName": "myapp",
-  "version": "2.0.1",
-  "replicas": 6,
+  "version": "2.3.2",
+  "replicas": 3,
   "logLevel": "INFO",
   "database": {
     "host": "dev-db.example.com",
