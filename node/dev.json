@@ -2,7 +2,7 @@
   "environment": "dev",
   "nodeName": "node-01",
   "nodeType": "worker",
-  "region": "us-east-01",
+  "region": "us-east-1",
   "availabilityZone": "us-east-1a",
   "instanceType": "t3.micro",
   "os": "Amazon Linux 2023",
