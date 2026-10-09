@@ -11,7 +11,7 @@ pipeline {
         choice(name: 'ENVIRONMENT', choices: ['dev', 'stage', 'uat', 'prod'], description: 'Select environment')
         choice(name: 'NODE', choices: ['dev', 'stage', 'uat', 'prod'], description: 'Select node configuration')
         string(name: 'ENV_APPNAME', defaultValue: 'myapp', description: 'Application name')
-        string(name: 'ENV_VERSION', defaultValue: '2.0.0', description: 'Enter new version')
+        string(name: 'ENV_VERSION', defaultValue: '2.0.0', description: 'Enter any non-empty version')
         string(name: 'ENV_REPLICAS', defaultValue: '1', description: 'Number of replicas')
         choice(name: 'ENV_LOGLEVEL', choices: ['INFO', 'DEBUG', 'WARN', 'ERROR'], description: 'Application log level')
         string(name: 'NODE_NAME', defaultValue: 'node-01', description: 'Node name')
@@ -39,6 +39,7 @@ pipeline {
             steps {
                 deleteDir()
                 git branch: 'main', url: "${REPO_URL}"
+
                 sh '''
                     set -eu
                     git config user.name "Jenkins"
@@ -67,7 +68,6 @@ pipeline {
                         git -c http.extraheader="AUTHORIZATION: basic $AUTH" \
                             fetch origin feature/config-update
 
-                        # Reuse the existing feature branch.
                         git checkout -B feature/config-update \
                             refs/remotes/origin/feature/config-update
 
@@ -87,20 +87,16 @@ pipeline {
                     env.SELECTED_NODE = params.NODE.toString().trim()
                     env.NEW_VERSION = params.ENV_VERSION.toString().trim()
 
+                    if (!env.NEW_VERSION) {
+                        error('ENV_VERSION cannot be empty. Enter any version.')
+                    }
+
                     if (!(env.SELECTED_ENV in ['dev', 'stage', 'uat', 'prod'])) {
                         error('Select a valid environment.')
                     }
 
                     if (!(env.SELECTED_NODE in ['dev', 'stage', 'uat', 'prod'])) {
                         error('Select a valid node.')
-                    }
-
-                    if (!env.NEW_VERSION) {
-                        error('ENV_VERSION cannot be empty.')
-                    }
-
-                    if (!(env.NEW_VERSION ==~ /^[0-9]+\\.[0-9]+\\.[0-9]+$/)) {
-                        error('Version must use X.Y.Z format, for example 2.3.4')
                     }
 
                     env.OLD_VERSION = sh(
@@ -111,14 +107,10 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
-                    echo "Environment: ${env.SELECTED_ENV}"
-                    echo "Node: ${env.SELECTED_NODE}"
-                    echo "Current feature-branch version: ${env.OLD_VERSION}"
-                    echo "New version: ${env.NEW_VERSION}"
-
-                    if (env.NEW_VERSION == env.OLD_VERSION) {
-                        error('New version must differ from the current feature-branch version.')
-                    }
+                    echo "Selected environment: ${env.SELECTED_ENV}"
+                    echo "Selected node: ${env.SELECTED_NODE}"
+                    echo "Existing version: ${env.OLD_VERSION}"
+                    echo "New version entered: ${env.NEW_VERSION}"
                 }
             }
         }
@@ -142,10 +134,11 @@ pipeline {
 import json
 import os
 
-env_name = os.environ["SELECTED_ENV"]
-node_name = os.environ["SELECTED_NODE"]
-env_file = f"environment/{env_name}.json"
-node_file = f"node/{node_name}.json"
+environment = os.environ["SELECTED_ENV"]
+node_selection = os.environ["SELECTED_NODE"]
+
+env_file = f"environment/{environment}.json"
+node_file = f"node/{node_selection}.json"
 
 replicas = int(os.environ["APP_REPLICAS"])
 if replicas < 1:
@@ -177,6 +170,7 @@ with open(node_file, "w", encoding="utf-8") as f:
 
 print("Updated:", env_file)
 print("Updated:", node_file)
+print("Version saved:", os.environ["APP_VERSION"])
 PY
                     '''
                 }
@@ -187,6 +181,7 @@ PY
             steps {
                 script {
                     def scannerHome = tool 'SonarQube-Scanner'
+
                     withSonarQubeEnv('SonarQube-Server') {
                         sh """
                             set -eu
@@ -205,6 +200,7 @@ PY
             steps {
                 sh '''
                     set -eu
+
                     if [ -f pom.xml ]; then
                         mvn -B clean package
                     else
@@ -388,13 +384,16 @@ PY
                         set +x
 
                         AUTH=$(printf '%s' "$GITHUB_USER:$GITHUB_TOKEN" | base64 | tr -d '\\n')
-                        git -c http.extraheader="AUTHORIZATION: basic $AUTH" fetch origin main
+
+                        git -c http.extraheader="AUTHORIZATION: basic $AUTH" \
+                            fetch origin main
 
                         rm -rf artifact config-artifact.zip
                         mkdir -p artifact/environment artifact/node
 
                         git show "origin/main:environment/${SELECTED_ENV}.json" \
                             > "artifact/environment/${SELECTED_ENV}.json"
+
                         git show "origin/main:node/${SELECTED_NODE}.json" \
                             > "artifact/node/${SELECTED_NODE}.json"
 
@@ -442,11 +441,11 @@ PY
             echo "Environment: ${env.SELECTED_ENV}"
             echo "Node: ${env.SELECTED_NODE}"
             echo "Existing branch used: feature/config-update"
-            echo 'Configuration merged and artifact uploaded.'
+            echo "Configuration merged and artifact uploaded."
         }
 
         failure {
-            echo 'Pipeline failed. Check the first error in Console Output.'
+            echo "Pipeline failed. Check the first error in Console Output."
         }
 
         always {
