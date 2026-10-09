@@ -8,63 +8,115 @@ pipeline {
     }
 
     parameters {
-        choice(name: 'ENVIRONMENT', choices: ['dev', 'stage', 'uat', 'prod'], description: 'Environment')
-        choice(name: 'NODE', choices: ['dev', 'stage', 'uat', 'prod'], description: 'Node configuration')
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['dev', 'stage', 'uat', 'prod'],
+            description: 'Select environment'
+        )
 
-        string(name: 'ENV_APPNAME', defaultValue: 'myapp', description: 'Application name')
-        string(name: 'ENV_VERSION', defaultValue: '2.0.0', description: 'Application version')
-        string(name: 'ENV_REPLICAS', defaultValue: '1', description: 'Replica count')
-        choice(name: 'ENV_LOGLEVEL', choices: ['INFO', 'DEBUG', 'WARN', 'ERROR'], description: 'Log level')
+        choice(
+            name: 'NODE',
+            choices: ['dev', 'stage', 'uat', 'prod'],
+            description: 'Select node configuration'
+        )
 
-        string(name: 'NODE_NAME', defaultValue: 'node-01', description: 'Node name')
-        choice(name: 'NODE_TYPE', choices: ['worker', 'master'], description: 'Node type')
-        string(name: 'NODE_REGION', defaultValue: 'us-east-1', description: 'AWS region')
-        string(name: 'NODE_AZ', defaultValue: 'us-east-1a', description: 'Availability zone')
+        string(
+            name: 'ENV_APPNAME',
+            defaultValue: 'myapp',
+            description: 'Application name'
+        )
+
+        string(
+            name: 'ENV_VERSION',
+            defaultValue: '3.1.0',
+            description: 'Application version'
+        )
+
+        string(
+            name: 'ENV_REPLICAS',
+            defaultValue: '1',
+            description: 'Number of replicas'
+        )
+
+        choice(
+            name: 'ENV_LOGLEVEL',
+            choices: ['INFO', 'DEBUG', 'WARN', 'ERROR'],
+            description: 'Application log level'
+        )
+
+        string(
+            name: 'NODE_NAME',
+            defaultValue: 'node-01',
+            description: 'Node name'
+        )
+
+        choice(
+            name: 'NODE_TYPE',
+            choices: ['worker', 'master'],
+            description: 'Node type'
+        )
+
+        string(
+            name: 'NODE_REGION',
+            defaultValue: 'us-east-1',
+            description: 'AWS region'
+        )
+
+        string(
+            name: 'NODE_AZ',
+            defaultValue: 'us-east-1a',
+            description: 'Availability zone'
+        )
     }
 
     environment {
         GITHUB_OWNER = 'chvkarthik-87'
         REPO_NAME = 'jenkins-config-automation'
-        FEATURE_BRANCH = 'feature/config-update'
 
-        SONAR_PROJECT_KEY = 'jenkins-config-automation'
+        SONARQUBE_NAME = 'SonarQube-Server'
+        SONAR_SCANNER = 'SonarQube-Scanner'
 
         NEXUS_URL = 'http://98.83.162.0:8081'
         NEXUS_REPOSITORY = 'maven-releases'
-        ARTIFACT_GROUP = 'com.chvkarthik.config'
-        ARTIFACT_NAME = 'jenkins-config-automation'
+
+        ARTIFACT_NAME = 'config-artifact'
     }
 
     stages {
-        stage('Checkout Main') {
-            steps {
-                deleteDir()
-                git branch: 'main',
-                    url: 'https://github.com/chvkarthik-87/jenkins-config-automation.git'
 
-                sh 'git status --short'
+        stage('Initialize') {
+            steps {
+                script {
+                    env.FEATURE_BRANCH =
+                        "feature/config-${params.ENVIRONMENT}-${params.NODE}-${env.BUILD_NUMBER}"
+
+                    env.ARTIFACT_FILE =
+                        "config-artifact-${params.ENV_VERSION}.zip"
+
+                    echo "Environment: ${params.ENVIRONMENT}"
+                    echo "Node: ${params.NODE}"
+                    echo "Feature branch: ${env.FEATURE_BRANCH}"
+                    echo "Version: ${params.ENV_VERSION}"
+                }
             }
         }
 
-        stage('Prepare Feature Branch') {
+        stage('Checkout Main') {
             steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'github-jenkins-token',
-                    usernameVariable: 'GH_USER',
-                    passwordVariable: 'GH_TOKEN'
-                )]) {
-                    sh '''
-                        set -eu
+                deleteDir()
 
-                        AUTH_HEADER="$(printf '%s' "$GH_USER:$GH_TOKEN" | base64 | tr -d '\\n')"
+                git(
+                    url: 'https://github.com/chvkarthik-87/jenkins-config-automation.git',
+                    branch: 'main',
+                    credentialsId: 'github-jenkins-token'
+                )
 
-                        git -c http.extraheader="AUTHORIZATION: basic $AUTH_HEADER" fetch origin main
-                        git checkout -B "$FEATURE_BRANCH" origin/main
-
-                        git config user.name "$GH_USER"
-                        git config user.email "$GH_USER@users.noreply.github.com"
-                    '''
-                }
+                sh '''
+                    set -eu
+                    git status --short
+                    test -f "environment/$ENVIRONMENT.json"
+                    test -f "node/$NODE.json"
+                '''
             }
         }
 
@@ -73,96 +125,86 @@ pipeline {
                 writeFile file: 'update_config.py', text: '''
 import json
 import os
-from pathlib import Path
 
-env_name = os.environ["ENVIRONMENT"]
-node_name = os.environ["NODE"]
+environment = os.environ["ENVIRONMENT"]
+node = os.environ["NODE"]
 
-env_file = Path("environment") / (env_name + ".json")
-node_file = Path("node") / (node_name + ".json")
+env_file = f"environment/{environment}.json"
+node_file = f"node/{node}.json"
 
-for path in (env_file, node_file):
-    if not path.is_file():
-        raise SystemExit("Missing required file: " + str(path))
+with open(env_file, encoding="utf-8") as f:
+    env_data = json.load(f)
 
-def load_object(path):
-    with path.open(encoding="utf-8") as f:
-        data = json.load(f)
-    if not isinstance(data, dict):
-        raise ValueError(str(path) + " must contain a JSON object")
-    return data
+with open(node_file, encoding="utf-8") as f:
+    node_data = json.load(f)
 
-env_data = load_object(env_file)
-node_data = load_object(node_file)
+env_data.update({
+    "appName": os.environ["ENV_APPNAME"],
+    "version": os.environ["ENV_VERSION"],
+    "replicas": int(os.environ["ENV_REPLICAS"]),
+    "logLevel": os.environ["ENV_LOGLEVEL"]
+})
 
-replicas = int(os.environ["ENV_REPLICAS"])
-if replicas < 1:
-    raise ValueError("ENV_REPLICAS must be at least 1")
+node_data.update({
+    "name": os.environ["NODE_NAME"],
+    "type": os.environ["NODE_TYPE"],
+    "region": os.environ["NODE_REGION"],
+    "availabilityZone": os.environ["NODE_AZ"]
+})
 
-env_data["appName"] = os.environ["ENV_APPNAME"]
-env_data["version"] = os.environ["ENV_VERSION"]
-env_data["replicas"] = replicas
-env_data["logLevel"] = os.environ["ENV_LOGLEVEL"]
-
-node_data["name"] = os.environ["NODE_NAME"]
-node_data["type"] = os.environ["NODE_TYPE"]
-node_data["region"] = os.environ["NODE_REGION"]
-node_data["availabilityZone"] = os.environ["NODE_AZ"]
-
-with env_file.open("w", encoding="utf-8") as f:
+with open(env_file, "w", encoding="utf-8") as f:
     json.dump(env_data, f, indent=2)
     f.write("\\n")
 
-with node_file.open("w", encoding="utf-8") as f:
+with open(node_file, "w", encoding="utf-8") as f:
     json.dump(node_data, f, indent=2)
     f.write("\\n")
 
-print("Updated", env_file)
-print("Updated", node_file)
+print("Updated:", env_file)
+print("Updated:", node_file)
 '''
 
-                sh 'python3 update_config.py'
-            }
-        }
+                withEnv([
+                    "ENVIRONMENT=${params.ENVIRONMENT}",
+                    "NODE=${params.NODE}",
+                    "ENV_APPNAME=${params.ENV_APPNAME}",
+                    "ENV_VERSION=${params.ENV_VERSION}",
+                    "ENV_REPLICAS=${params.ENV_REPLICAS}",
+                    "ENV_LOGLEVEL=${params.ENV_LOGLEVEL}",
+                    "NODE_NAME=${params.NODE_NAME}",
+                    "NODE_TYPE=${params.NODE_TYPE}",
+                    "NODE_REGION=${params.NODE_REGION}",
+                    "NODE_AZ=${params.NODE_AZ}"
+                ]) {
+                    sh 'python3 update_config.py'
+                }
 
-        stage('Validate JSON') {
-            steps {
-                writeFile file: 'validate_json.py', text: '''
-import json
-from pathlib import Path
-
-files = list(Path("environment").glob("*.json"))
-files += list(Path("node").glob("*.json"))
-
-if not files:
-    raise SystemExit("No JSON configuration files found")
-
-for path in files:
-    with path.open(encoding="utf-8") as f:
-        json.load(f)
-    print("VALID:", path)
-'''
-
-                sh 'python3 validate_json.py'
+                sh '''
+                    set -eu
+                    python3 -m json.tool "environment/$ENVIRONMENT.json" >/dev/null
+                    python3 -m json.tool "node/$NODE.json" >/dev/null
+                    echo "JSON validation successful."
+                '''
             }
         }
 
         stage('SonarQube Analysis') {
             steps {
                 script {
-                    def scannerHome = tool 'SonarQube-Scanner'
+                    def scannerHome = tool(
+                        name: env.SONAR_SCANNER,
+                        type: 'hudson.plugins.sonar.SonarRunnerInstallation'
+                    )
 
-                    withSonarQubeEnv('SonarQube-Server') {
-                        withEnv(["SCANNER_HOME=${scannerHome}"]) {
-                            sh '''
-                                set -eu
-
-                                "$SCANNER_HOME/bin/sonar-scanner" \
-                                  -Dsonar.projectKey="$SONAR_PROJECT_KEY" \
-                                  -Dsonar.projectName=jenkins-config-automation \
-                                  -Dsonar.sources=environment,node
-                            '''
-                        }
+                    withSonarQubeEnv(env.SONARQUBE_NAME) {
+                        sh """
+                            set -eu
+                            "${scannerHome}/bin/sonar-scanner" \
+                              -Dsonar.projectKey=jenkins-config-automation \
+                              -Dsonar.projectName=jenkins-config-automation \
+                              -Dsonar.sources=environment,node \
+                              -Dsonar.sourceEncoding=UTF-8
+                        """
                     }
                 }
             }
@@ -172,19 +214,45 @@ for path in files:
             steps {
                 script {
                     if (fileExists('pom.xml')) {
-                        def mavenHome = tool 'Maven-3'
+                        def mavenHome = tool(
+                            name: 'Maven-3',
+                            type: 'hudson.tasks.Maven$MavenInstallation'
+                        )
 
-                        withEnv(["PATH+MAVEN=${mavenHome}/bin"]) {
-                            sh 'mvn -B clean package'
-                        }
+                        sh """
+                            set -eu
+                            "${mavenHome}/bin/mvn" -B clean package
+                        """
                     } else {
-                        echo 'No pom.xml found. Skipping Maven for this JSON configuration repository.'
+                        echo 'No pom.xml found. Maven compilation skipped for this configuration repository.'
                     }
                 }
             }
         }
 
-        stage('Commit and Push') {
+        stage('Prepare Feature Branch') {
+            steps {
+                sh '''
+                    set -eu
+
+                    git config user.name "Jenkins"
+                    git config user.email "jenkins@example.com"
+
+                    git switch -c "$FEATURE_BRANCH"
+
+                    git add "environment/$ENVIRONMENT.json" "node/$NODE.json"
+
+                    if git diff --cached --quiet; then
+                        echo "No changes detected."
+                        exit 1
+                    fi
+
+                    git commit -m "Update $ENVIRONMENT and $NODE configuration"
+                '''
+            }
+        }
+
+        stage('Push Feature Branch') {
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'github-jenkins-token',
@@ -194,24 +262,16 @@ for path in files:
                     sh '''
                         set -eu
 
-                        git add "environment/$ENVIRONMENT.json" "node/$NODE.json"
-
-                        if ! git diff --cached --quiet; then
-                            git commit -m "Update $ENVIRONMENT and $NODE configuration"
-                        else
-                            echo "No configuration changes to commit."
-                        fi
-
                         AUTH_HEADER="$(printf '%s' "$GH_USER:$GH_TOKEN" | base64 | tr -d '\\n')"
 
                         git -c http.extraheader="AUTHORIZATION: basic $AUTH_HEADER" \
-                            push origin "HEAD:$FEATURE_BRANCH"
+                            push origin "HEAD:refs/heads/$FEATURE_BRANCH"
                     '''
                 }
             }
         }
 
-        stage('Create or Reuse Pull Request') {
+        stage('Create Pull Request') {
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'github-jenkins-token',
@@ -229,7 +289,7 @@ repo = os.environ["REPO_NAME"]
 branch = os.environ["FEATURE_BRANCH"]
 token = os.environ["GH_TOKEN"]
 
-base = "https://api.github.com/repos/" + owner + "/" + repo
+base = f"https://api.github.com/repos/{owner}/{repo}"
 
 def api(path, method="GET", body=None):
     data = None if body is None else json.dumps(body).encode()
@@ -239,13 +299,17 @@ def api(path, method="GET", body=None):
     req.add_header("X-GitHub-Api-Version", "2022-11-28")
     if data is not None:
         req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=30) as response:
-        raw = response.read()
-        return json.loads(raw) if raw else {}
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            raw = response.read()
+            return json.loads(raw) if raw else {}
+    except Exception as e:
+        raise RuntimeError(f"GitHub API failed for {path}: {e}") from e
 
 query = urllib.parse.urlencode({
     "state": "open",
-    "head": owner + ":" + branch,
+    "head": f"{owner}:{branch}",
     "base": "main"
 })
 
@@ -253,18 +317,20 @@ pulls = api("/pulls?" + query)
 
 if pulls:
     pr = pulls[0]
-    print("Reusing open pull request:", pr["number"])
+    print("Using existing PR:", pr["number"])
 else:
     pr = api("/pulls", "POST", {
-        "title": "Automated configuration update",
+        "title": f"Configuration update: {branch}",
         "head": branch,
         "base": "main",
         "body": "Created automatically by Jenkins."
     })
-    print("Created pull request:", pr["number"])
+    print("Created PR:", pr["number"])
 
 with open("pr-number.txt", "w") as f:
     f.write(str(pr["number"]))
+
+print("Pull request URL:", pr["html_url"])
 '''
 
                     sh 'python3 manage_pr.py'
@@ -293,7 +359,7 @@ token = os.environ["GH_TOKEN"]
 with open("pr-number.txt") as f:
     number = f.read().strip()
 
-base = "https://api.github.com/repos/" + owner + "/" + repo
+base = f"https://api.github.com/repos/{owner}/{repo}"
 
 def request(path, method="GET", body=None):
     data = None if body is None else json.dumps(body).encode()
@@ -301,68 +367,61 @@ def request(path, method="GET", body=None):
     req.add_header("Authorization", "Bearer " + token)
     req.add_header("Accept", "application/vnd.github+json")
     req.add_header("X-GitHub-Api-Version", "2022-11-28")
+
     if data is not None:
         req.add_header("Content-Type", "application/json")
+
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
             raw = response.read()
             return response.status, json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
-        raw = e.read().decode("utf-8", "replace")
-        try:
-            detail = json.loads(raw)
-        except Exception:
-            detail = {"message": raw}
-        return e.code, detail
+        detail = e.read().decode("utf-8", "replace")
+        raise RuntimeError(f"GitHub returned HTTP {e.code}: {detail}") from e
 
-for attempt in range(1, 11):
-    status, pr = request("/pulls/" + number)
-
-    if status != 200:
-        raise SystemExit("Cannot read PR: " + json.dumps(pr))
+# Wait for GitHub to calculate PR mergeability.
+pr = {}
+for attempt in range(12):
+    _, pr = request(f"/pulls/{number}")
 
     if pr.get("merged"):
         print("Pull request is already merged.")
         break
 
-    if pr.get("state") != "open":
-        raise SystemExit("Pull request is not open: " + pr.get("state", "unknown"))
-
     mergeable = pr.get("mergeable")
 
-    if mergeable is False:
-        raise SystemExit("PR has merge conflicts. Resolve them before merging.")
-
-    if mergeable is None:
-        print("GitHub is calculating mergeability. Attempt", attempt)
-        time.sleep(5)
-        continue
-
-    status, result = request(
-        "/pulls/" + number + "/merge",
-        "PUT",
-        {"merge_method": "squash"}
-    )
-
-    if status == 200 and result.get("merged"):
-        print("Pull request merged successfully.")
+    if mergeable is not None:
         break
 
-    print("Merge attempt response:", status, json.dumps(result))
-
-    if status not in (405, 409, 422):
-        raise SystemExit("GitHub merge request failed.")
-
+    print("Waiting for GitHub mergeability calculation...")
     time.sleep(5)
-else:
-    raise SystemExit(
-        "Automatic merge did not finish. Check branch protection, required "
-        "reviews/checks, conflicts, and GitHub token permissions."
+
+if not pr.get("merged"):
+    if pr.get("mergeable") is False:
+        raise RuntimeError(
+            "PR has merge conflicts. Resolve the conflicts before merging."
+        )
+
+    if pr.get("state") != "open":
+        raise RuntimeError("Pull request is not open.")
+
+    status, result = request(
+        f"/pulls/{number}/merge",
+        "PUT",
+        {
+            "merge_method": "squash",
+            "commit_title": f"Merge configuration update PR #{number}"
+        }
     )
 
-status, pr = request("/pulls/" + number)
-if status != 200 or not pr.get("merged"):
-    raise SystemExit("Could not verify that the pull request was merged.")
+    if not result.get("merged"):
+        raise RuntimeError(
+            "GitHub did not merge the PR: " + str(result)
+        )
+
+    print("PR merged:", result.get("message"))
+
+print("Automatic merge completed.")
 '''
 
                     sh 'python3 merge_pr.py'
@@ -372,71 +431,82 @@ if status != 200 or not pr.get("merged"):
 
         stage('Checkout Updated Main') {
             steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'github-jenkins-token',
-                    usernameVariable: 'GH_USER',
-                    passwordVariable: 'GH_TOKEN'
-                )]) {
-                    sh '''
-                        set -eu
+                deleteDir()
 
-                        AUTH_HEADER="$(printf '%s' "$GH_USER:$GH_TOKEN" | base64 | tr -d '\\n')"
+                git(
+                    url: 'https://github.com/chvkarthik-87/jenkins-config-automation.git',
+                    branch: 'main',
+                    credentialsId: 'github-jenkins-token'
+                )
 
-                        git -c http.extraheader="AUTHORIZATION: basic $AUTH_HEADER" fetch origin main
-                        git checkout -B main origin/main
-
-                        git log -1 --oneline
-                    '''
-                }
+                sh '''
+                    set -eu
+                    git log -1 --oneline
+                    python3 -m json.tool "environment/$ENVIRONMENT.json" >/dev/null
+                    python3 -m json.tool "node/$NODE.json" >/dev/null
+                '''
             }
         }
 
         stage('Package Artifact') {
             steps {
-                writeFile file: 'package_config.py', text: '''
+                writeFile file: 'package_artifact.py', text: '''
 import os
 import zipfile
-from pathlib import Path
 
-env_file = Path("environment") / (os.environ["ENVIRONMENT"] + ".json")
-node_file = Path("node") / (os.environ["NODE"] + ".json")
+version = os.environ["ENV_VERSION"]
+artifact = f"config-artifact-{version}.zip"
 
-for path in (env_file, node_file):
-    if not path.is_file():
-        raise SystemExit("Missing configuration on main: " + str(path))
+files = []
 
-with zipfile.ZipFile("config-artifact.zip", "w", zipfile.ZIP_DEFLATED) as archive:
-    archive.write(env_file, str(env_file))
-    archive.write(node_file, str(node_file))
+for folder in ("environment", "node"):
+    for root, _, names in os.walk(folder):
+        for name in names:
+            if name.endswith(".json"):
+                files.append(os.path.join(root, name))
 
-print("Created config-artifact.zip")
+if not files:
+    raise RuntimeError("No JSON configuration files found.")
+
+with zipfile.ZipFile(artifact, "w", zipfile.ZIP_DEFLATED) as z:
+    for path in sorted(files):
+        z.write(path)
+
+print("Created artifact:", artifact)
 '''
 
-                sh 'python3 package_config.py'
-                archiveArtifacts artifacts: 'config-artifact.zip', fingerprint: true
+                withEnv(["ENV_VERSION=${params.ENV_VERSION}"]) {
+                    sh 'python3 package_artifact.py'
+                }
+
+                archiveArtifacts(
+                    artifacts: 'config-artifact-*.zip',
+                    fingerprint: true
+                )
             }
         }
 
-        stage('Upload to Nexus') {
+        stage('Upload Artifact to Nexus') {
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'nexus-admin-new',
                     usernameVariable: 'NEXUS_USER',
-                    passwordVariable: 'NEXUS_PASSWORD'
+                    passwordVariable: 'NEXUS_PASS'
                 )]) {
-                    withEnv(["UPLOAD_VERSION=${params.ENV_VERSION}-${env.BUILD_NUMBER}"]) {
+                    withEnv(["ENV_VERSION=${params.ENV_VERSION}"]) {
                         sh '''
                             set -eu
 
-                            curl --fail-with-body -sS \
-                              -u "$NEXUS_USER:$NEXUS_PASSWORD" \
-                              -X POST \
-                              "$NEXUS_URL/service/rest/v1/components?repository=$NEXUS_REPOSITORY" \
-                              -F "maven2.groupId=$ARTIFACT_GROUP" \
-                              -F "maven2.artifactId=$ARTIFACT_NAME" \
-                              -F "maven2.version=$UPLOAD_VERSION" \
-                              -F "maven2.asset1=@config-artifact.zip" \
-                              -F "maven2.asset1.extension=zip"
+                            ARTIFACT="config-artifact-${ENV_VERSION}.zip"
+
+                            test -f "$ARTIFACT"
+
+                            URL="${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/com/chvkarthik/config-artifact/${ENV_VERSION}/${ARTIFACT}"
+
+                            curl --fail --show-error --silent \
+                                --user "$NEXUS_USER:$NEXUS_PASS" \
+                                --upload-file "$ARTIFACT" \
+                                "$URL"
 
                             echo "Artifact uploaded to Nexus."
                         '''
@@ -450,9 +520,11 @@ print("Created config-artifact.zip")
         success {
             echo 'Pipeline completed successfully.'
         }
+
         failure {
             echo 'Pipeline failed. Check the first failed stage in Console Output.'
         }
+
         always {
             echo 'Jenkins pipeline finished.'
         }
