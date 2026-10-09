@@ -2,22 +2,18 @@ pipeline {
     agent any
 
     parameters {
-        choice(
-            name: 'ENVIRONMENT',
-            choices: ['dev', 'stage', 'uat', 'prod'],
-            description: 'Select environment'
-        )
+        choice(name: 'ENVIRONMENT',
+               choices: ['dev', 'stage', 'uat', 'prod'],
+               description: 'Select environment')
 
-        choice(
-            name: 'NODE',
-            choices: ['dev', 'stage', 'uat', 'prod'],
-            description: 'Select node'
-        )
+        choice(name: 'NODE',
+               choices: ['dev', 'stage', 'uat', 'prod'],
+               description: 'Select node')
 
         string(name: 'ENV_APPNAME', defaultValue: 'myapp',
                description: 'Application name')
         string(name: 'ENV_VERSION', defaultValue: '2.0.3',
-               description: 'New application version')
+               description: 'New version')
         string(name: 'ENV_REPLICAS', defaultValue: '1',
                description: 'Number of replicas')
         string(name: 'ENV_LOGLEVEL', defaultValue: 'INFO',
@@ -28,7 +24,7 @@ pipeline {
         string(name: 'NODE_TYPE', defaultValue: 'worker',
                description: 'Node type')
         string(name: 'NODE_REGION', defaultValue: 'us-east-1',
-               description: 'Node region')
+               description: 'AWS region')
         string(name: 'NODE_AZ', defaultValue: 'us-east-1a',
                description: 'Availability zone')
     }
@@ -55,8 +51,10 @@ pipeline {
                     credentialsId: 'github-jenkins-token',
                     url: "https://github.com/${GITHUB_REPO}.git"
 
-                sh 'git fetch origin main'
-                sh 'git checkout -B main origin/main'
+                sh '''
+                    git fetch origin main
+                    git checkout -B main origin/main
+                '''
             }
         }
 
@@ -66,17 +64,22 @@ pipeline {
                     def envFile = "environment/${params.ENVIRONMENT}.json"
 
                     if (!fileExists(envFile)) {
-                        error("File not found: ${envFile}")
+                        error("Environment file not found: ${envFile}")
                     }
 
-                    def json = readJSON file: envFile
-                    env.LAST_VERSION = json.version.toString()
+                    def config = readJSON(file: envFile)
 
-                    echo "Last updated version: ${env.LAST_VERSION}"
-                    echo "New requested version: ${params.ENV_VERSION}"
+                    if (config.version == null) {
+                        error("The version field is missing in ${envFile}")
+                    }
+
+                    env.LAST_VERSION = config.version.toString()
+
+                    echo "Previous version: ${env.LAST_VERSION}"
+                    echo "Requested version: ${params.ENV_VERSION}"
 
                     if (env.LAST_VERSION == params.ENV_VERSION) {
-                        error('The requested version is already present. Enter a different version.')
+                        error('This version is already configured. Enter a different version.')
                     }
                 }
             }
@@ -86,7 +89,11 @@ pipeline {
             steps {
                 script {
                     if (!(params.ENV_REPLICAS ==~ /^[0-9]+$/)) {
-                        error('ENV_REPLICAS must be a number.')
+                        error('ENV_REPLICAS must be a positive integer.')
+                    }
+
+                    if (!params.ENV_VERSION?.trim()) {
+                        error('ENV_VERSION cannot be empty.')
                     }
 
                     def envFile = "environment/${params.ENVIRONMENT}.json"
@@ -96,23 +103,31 @@ pipeline {
                         error('Selected environment or node JSON file does not exist.')
                     }
 
-                    def envJson = readJSON file: envFile
+                    def envJson = readJSON(file: envFile)
                     envJson.appName = params.ENV_APPNAME
                     envJson.version = params.ENV_VERSION
                     envJson.replicas = params.ENV_REPLICAS.toInteger()
                     envJson.logLevel = params.ENV_LOGLEVEL
 
-                    writeJSON file: envFile, json: envJson, pretty: 4
+                    writeJSON(
+                        file: envFile,
+                        json: envJson,
+                        pretty: 4
+                    )
 
-                    def nodeJson = readJSON file: nodeFile
+                    def nodeJson = readJSON(file: nodeFile)
                     nodeJson.name = params.NODE_NAME
                     nodeJson.type = params.NODE_TYPE
                     nodeJson.region = params.NODE_REGION
                     nodeJson.availabilityZone = params.NODE_AZ
 
-                    writeJSON file: nodeFile, json: nodeJson, pretty: 4
+                    writeJSON(
+                        file: nodeFile,
+                        json: nodeJson,
+                        pretty: 4
+                    )
 
-                    echo 'Selected JSON files updated automatically.'
+                    echo 'Environment and node JSON files updated.'
                 }
             }
         }
@@ -120,8 +135,9 @@ pipeline {
         stage('Validate JSON') {
             steps {
                 sh '''
-                    python3 -m json.tool environment/${ENVIRONMENT}.json > /dev/null
-                    python3 -m json.tool node/${NODE}.json > /dev/null
+                    set -eu
+                    python3 -m json.tool "environment/${ENVIRONMENT}.json" > /dev/null
+                    python3 -m json.tool "node/${NODE}.json" > /dev/null
                     echo "JSON validation successful"
                 '''
             }
@@ -132,6 +148,7 @@ pipeline {
                 withSonarQubeEnv('SonarQube-Server') {
                     script {
                         def scannerHome = tool 'SonarQube-Scanner'
+
                         sh """
                             "${scannerHome}/bin/sonar-scanner" \
                               -Dsonar.projectKey=jenkins-config-automation \
@@ -147,6 +164,7 @@ pipeline {
         stage('Prepare Feature Branch') {
             steps {
                 sh '''
+                    set -eu
                     git config user.name "Jenkins Automation"
                     git config user.email "jenkins@example.com"
                     git checkout -B "$FEATURE_BRANCH"
@@ -159,13 +177,17 @@ pipeline {
         stage('Commit Changes') {
             steps {
                 script {
-                    def changes = sh(
+                    def status = sh(
                         script: 'git diff --cached --quiet',
                         returnStatus: true
                     )
 
-                    if (changes == 0) {
-                        error('No JSON changes detected. Check the parameter values.')
+                    if (status == 0) {
+                        error('No changes detected. Check the parameters and selected JSON files.')
+                    }
+
+                    if (status != 1) {
+                        error('Unable to check staged changes.')
                     }
                 }
 
@@ -184,6 +206,8 @@ pipeline {
                 )]) {
                     sh '''
                         set +x
+                        set -eu
+
                         ASKPASS_FILE="$(mktemp)"
                         trap 'rm -f "$ASKPASS_FILE"' EXIT
 
@@ -196,11 +220,13 @@ case "$1" in
 esac
 EOF
                         chmod 700 "$ASKPASS_FILE"
+
                         export GIT_ASKPASS="$ASKPASS_FILE"
                         export GIT_TERMINAL_PROMPT=0
 
-                        git push -f https://github.com/${GITHUB_REPO}.git \
-                            HEAD:${FEATURE_BRANCH}
+                        git push -f \
+                          "https://github.com/${GITHUB_REPO}.git" \
+                          "HEAD:${FEATURE_BRANCH}"
                     '''
                 }
             }
@@ -214,39 +240,66 @@ EOF
                     passwordVariable: 'GH_TOKEN'
                 )]) {
                     script {
-                        def prNumber = sh(
+                        def existingPR = sh(
                             script: '''
-                                set +x
-                                curl -fsS \
+                                set -eu
+                                RESPONSE=$(mktemp)
+                                trap 'rm -f "$RESPONSE"' EXIT
+
+                                CODE=$(curl -sS -o "$RESPONSE" -w '%{http_code}' \
                                   -H "Authorization: Bearer $GH_TOKEN" \
                                   -H "Accept: application/vnd.github+json" \
-                                  "https://api.github.com/repos/${GITHUB_REPO}/pulls?state=open&head=chvkarthik-87:${FEATURE_BRANCH}&base=main" |
-                                python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["number"] if d else "")'
+                                  "https://api.github.com/repos/${GITHUB_REPO}/pulls?state=open&head=chvkarthik-87%3A${FEATURE_BRANCH}&base=main")
+
+                                if [ "$CODE" != "200" ]; then
+                                    cat "$RESPONSE"
+                                    echo "Could not check existing PRs. HTTP $CODE"
+                                    exit 1
+                                fi
+
+                                python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d[0]["number"] if d else "")' "$RESPONSE"
                             ''',
                             returnStdout: true
                         ).trim()
 
-                        if (!prNumber) {
-                            prNumber = sh(
+                        if (existingPR) {
+                            env.PR_NUMBER = existingPR
+                            echo "Found existing pull request #${env.PR_NUMBER}"
+                        } else {
+                            def newPR = sh(
                                 script: '''
-                                    set +x
-                                    curl -fsS -X POST \
+                                    set -eu
+                                    RESPONSE=$(mktemp)
+                                    trap 'rm -f "$RESPONSE"' EXIT
+
+                                    PAYLOAD=$(python3 -c 'import json,os; print(json.dumps({"title":"Automated configuration update","head":os.environ["FEATURE_BRANCH"],"base":"main","body":"Created automatically by Jenkins."}))')
+
+                                    CODE=$(curl -sS -o "$RESPONSE" -w '%{http_code}' \
+                                      -X POST \
                                       -H "Authorization: Bearer $GH_TOKEN" \
                                       -H "Accept: application/vnd.github+json" \
-                                      https://api.github.com/repos/${GITHUB_REPO}/pulls \
-                                      -d "{\"title\":\"Automated configuration update\",\"head\":\"${FEATURE_BRANCH}\",\"base\":\"main\",\"body\":\"Created automatically by Jenkins.\"}" |
-                                    python3 -c 'import json,sys; print(json.load(sys.stdin)["number"])'
+                                      -H "Content-Type: application/json" \
+                                      "https://api.github.com/repos/${GITHUB_REPO}/pulls" \
+                                      --data "$PAYLOAD")
+
+                                    if [ "$CODE" != "201" ]; then
+                                        cat "$RESPONSE"
+                                        echo "PR creation failed. HTTP $CODE"
+                                        exit 1
+                                    fi
+
+                                    python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["number"])' "$RESPONSE"
                                 ''',
                                 returnStdout: true
                             ).trim()
+
+                            env.PR_NUMBER = newPR
+                            echo "Created pull request #${env.PR_NUMBER}"
                         }
 
-                        if (!(prNumber ==~ /^[0-9]+$/)) {
-                            error("Could not obtain a valid GitHub PR number: ${prNumber}")
+                        if (!(env.PR_NUMBER ==~ /^[0-9]+$/)) {
+                            error('GitHub did not return a valid pull request number.')
                         }
-
-                        env.PR_NUMBER = prNumber
-                        echo "Pull request number: ${env.PR_NUMBER}"
                     }
                 }
             }
@@ -261,22 +314,26 @@ EOF
                 )]) {
                     sh '''
                         set +x
-                        RESPONSE="$(mktemp)"
+                        set -eu
+
+                        RESPONSE=$(mktemp)
                         trap 'rm -f "$RESPONSE"' EXIT
 
                         CODE=$(curl -sS -o "$RESPONSE" -w '%{http_code}' \
                           -X PUT \
                           -H "Authorization: Bearer $GH_TOKEN" \
                           -H "Accept: application/vnd.github+json" \
+                          -H "Content-Type: application/json" \
                           "https://api.github.com/repos/${GITHUB_REPO}/pulls/${PR_NUMBER}/merge" \
-                          -d '{"merge_method":"squash"}')
-
-                        cat "$RESPONSE"
+                          --data '{"merge_method":"squash"}')
 
                         if [ "$CODE" != "200" ]; then
+                            cat "$RESPONSE"
                             echo "Automatic merge failed. HTTP $CODE"
                             exit 1
                         fi
+
+                        echo "Pull request merged successfully."
                     '''
                 }
             }
@@ -285,12 +342,18 @@ EOF
         stage('Verify Main') {
             steps {
                 sh '''
+                    set -eu
                     git fetch origin main
                     git checkout -B main origin/main
+
                     echo "Latest main commit:"
                     git log -1 --oneline
-                    cat environment/${ENVIRONMENT}.json
-                    cat node/${NODE}.json
+
+                    echo "Updated environment configuration:"
+                    cat "environment/${ENVIRONMENT}.json"
+
+                    echo "Updated node configuration:"
+                    cat "node/${NODE}.json"
                 '''
             }
         }
@@ -298,13 +361,18 @@ EOF
         stage('Package Configuration Artifact') {
             steps {
                 sh '''
+                    set -eu
                     mkdir -p build-artifact
-                    tar -czf "build-artifact/config-${ENVIRONMENT}-${NODE}-${ENV_VERSION}.tar.gz" \
-                        "environment/${ENVIRONMENT}.json" \
-                        "node/${NODE}.json"
+
+                    tar -czf \
+                      "build-artifact/config-${ENVIRONMENT}-${NODE}-${ENV_VERSION}.tar.gz" \
+                      "environment/${ENVIRONMENT}.json" \
+                      "node/${NODE}.json"
 
                     ls -lh build-artifact/
                 '''
+                archiveArtifacts artifacts: 'build-artifact/*.tar.gz',
+                                 fingerprint: true
             }
         }
 
@@ -317,10 +385,13 @@ EOF
                 )]) {
                     sh '''
                         set +x
+                        set -eu
 
                         FILE="build-artifact/config-${ENVIRONMENT}-${NODE}-${ENV_VERSION}.tar.gz"
+                        RESPONSE=$(mktemp)
+                        trap 'rm -f "$RESPONSE"' EXIT
 
-                        HTTP_CODE=$(curl -sS -o nexus-response.txt -w '%{http_code}' \
+                        CODE=$(curl -sS -o "$RESPONSE" -w '%{http_code}' \
                           -u "$NEXUS_USER:$NEXUS_PASSWORD" \
                           -X POST \
                           "${NEXUS_URL}/service/rest/v1/components?repository=${NEXUS_REPO}" \
@@ -331,11 +402,11 @@ EOF
                           -F "maven2.asset1=@${FILE}" \
                           -F "maven2.asset1.extension=tar.gz")
 
-                        if [ "$HTTP_CODE" != "204" ] &&
-                           [ "$HTTP_CODE" != "201" ] &&
-                           [ "$HTTP_CODE" != "200" ]; then
-                            echo "Nexus upload failed. HTTP $HTTP_CODE"
-                            cat nexus-response.txt
+                        if [ "$CODE" != "204" ] &&
+                           [ "$CODE" != "201" ] &&
+                           [ "$CODE" != "200" ]; then
+                            cat "$RESPONSE"
+                            echo "Nexus upload failed. HTTP $CODE"
                             exit 1
                         fi
 
@@ -348,7 +419,7 @@ EOF
 
     post {
         success {
-            echo "Pipeline completed successfully."
+            echo 'Pipeline completed successfully.'
             echo "Environment: ${params.ENVIRONMENT}"
             echo "Node: ${params.NODE}"
             echo "Previous version: ${env.LAST_VERSION}"
@@ -357,7 +428,7 @@ EOF
         }
 
         failure {
-            echo 'Pipeline failed. Check Console Output for the failed stage.'
+            echo 'Pipeline failed. Check the first error in Console Output.'
         }
     }
 }
