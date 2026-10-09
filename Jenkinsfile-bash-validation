@@ -2,12 +2,18 @@ pipeline {
     agent any
 
     stages {
-        stage('Check Bash Script') {
+        stage('Checkout Feature Branch') {
             steps {
                 dir('source') {
                     git branch: 'feature/config-update',
                         url: 'https://github.com/chvkarthik-87/jenkins-config-automation.git'
+                }
+            }
+        }
 
+        stage('Bash Syntax Validation') {
+            steps {
+                dir('source') {
                     sh '''
                         set -eu
 
@@ -25,14 +31,34 @@ pipeline {
                 }
             }
         }
+
+        stage('Bash Formatting Validation') {
+            steps {
+                dir('source') {
+                    sh '''
+                        set -eu
+
+                        if ! command -v shfmt >/dev/null 2>&1; then
+                            echo "ERROR: shfmt is not installed on this Jenkins agent."
+                            exit 1
+                        fi
+
+                        echo "Checking deploy.sh formatting..."
+                        shfmt -d deploy.sh
+
+                        echo "Bash formatting validation passed."
+                    '''
+                }
+            }
+        }
     }
 
     post {
         success {
-            echo 'Bash validation successful.'
+            echo 'SUCCESS: Bash syntax and formatting checks passed.'
         }
         failure {
-            echo 'Bash validation failed. Check the console output.'
+            echo 'ERROR: Bash validation failed. Check the console output.'
         }
     }
 }
