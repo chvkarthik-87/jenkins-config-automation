@@ -1,79 +1,37 @@
 pipeline {
-
     agent any
 
     parameters {
-
         choice(
             name: 'ENVIRONMENT',
             choices: ['dev', 'stage', 'uat', 'prod'],
             description: 'Select environment'
         )
-
         choice(
             name: 'NODE',
             choices: ['dev', 'stage', 'uat', 'prod'],
             description: 'Select node configuration'
         )
-
-        string(
-            name: 'ENV_APPNAME',
-            defaultValue: 'myapp',
-            description: 'Application name'
-        )
-
-        string(
-            name: 'ENV_VERSION',
-            defaultValue: '2.0.0',
-            description: 'Application version'
-        )
-
-        string(
-            name: 'ENV_REPLICAS',
-            defaultValue: '1',
-            description: 'Number of replicas'
-        )
-
-        string(
-            name: 'ENV_LOGLEVEL',
-            defaultValue: 'INFO',
-            description: 'Log level'
-        )
-
-        string(
-            name: 'NODE_NAME',
-            defaultValue: 'node-01',
-            description: 'Node name'
-        )
-
-        string(
-            name: 'NODE_TYPE',
-            defaultValue: 'worker',
-            description: 'Node type'
-        )
-
-        string(
-            name: 'NODE_REGION',
-            defaultValue: 'us-east-1',
-            description: 'AWS region'
-        )
-
-        string(
-            name: 'NODE_AZ',
-            defaultValue: 'us-east-1a',
-            description: 'Availability zone'
-        )
+        string(name: 'ENV_APPNAME', defaultValue: 'myapp', description: 'Application name')
+        string(name: 'ENV_VERSION', defaultValue: '3.0.1', description: 'New version; must be greater than current version')
+        string(name: 'ENV_REPLICAS', defaultValue: '1', description: 'Number of replicas')
+        choice(name: 'ENV_LOGLEVEL', choices: ['INFO', 'DEBUG', 'WARN', 'ERROR'], description: 'Log level')
+        string(name: 'NODE_NAME', defaultValue: 'node-01', description: 'Node name')
+        choice(name: 'NODE_TYPE', choices: ['worker', 'master'], description: 'Node type')
+        string(name: 'NODE_REGION', defaultValue: 'us-east-1', description: 'AWS region')
+        string(name: 'NODE_AZ', defaultValue: 'us-east-1a', description: 'Availability zone')
     }
 
     environment {
+        GITHUB_REPO = 'https://github.com/chvkarthik-87/jenkins-config-automation.git'
+        GITHUB_API = 'https://api.github.com/repos/chvkarthik-87/jenkins-config-automation'
         FEATURE_BRANCH = 'feature/config-update'
+        SONAR_PROJECT_KEY = 'jenkins-config-automation'
     }
 
     stages {
-
         stage('Show Parameters') {
             steps {
-                echo "======================================"
                 echo "Environment : ${params.ENVIRONMENT}"
                 echo "Node        : ${params.NODE}"
                 echo "App Name    : ${params.ENV_APPNAME}"
@@ -84,31 +42,18 @@ pipeline {
                 echo "Node Type   : ${params.NODE_TYPE}"
                 echo "Region      : ${params.NODE_REGION}"
                 echo "AZ          : ${params.NODE_AZ}"
-                echo "======================================"
             }
         }
 
         stage('Prepare Feature Branch') {
             steps {
                 sh '''
+                    set -eu
                     git config user.name "Jenkins"
                     git config user.email "jenkins@example.com"
-
                     git fetch origin main
-                    git checkout main
-                    git reset --hard origin/main
-
-                    git fetch origin feature/config-update || true
-
-                    if git ls-remote --exit-code --heads origin feature/config-update > /dev/null 2>&1
-                    then
-                        echo "Feature branch already exists."
-                        git checkout -B feature/config-update origin/main
-                    else
-                        echo "Feature branch does not exist. Creating it..."
-                        git checkout -b feature/config-update
-                    fi
-
+                    git checkout -B main origin/main
+                    git checkout -B "$FEATURE_BRANCH" origin/main
                     echo "Current branch:"
                     git branch --show-current
                 '''
@@ -118,41 +63,93 @@ pipeline {
         stage('Update JSON Files') {
             steps {
                 sh '''
-                    echo "Updating Environment JSON..."
+                    set -eu
 
-                    envFile="environment/${ENVIRONMENT}.json"
+                    ENV_FILE="environment/${ENVIRONMENT}.json"
+                    NODE_FILE="node/${NODE}.json"
 
-                    sed -i -E 's/^  "environment": "[^"]+",/  "environment": "'${ENVIRONMENT}'",/' "$envFile"
+                    test -f "$ENV_FILE" || {
+                        echo "ERROR: $ENV_FILE not found"
+                        exit 1
+                    }
 
-                    sed -i -E 's/^  "appName": "[^"]+",/  "appName": "'${ENV_APPNAME}'",/' "$envFile"
+                    test -f "$NODE_FILE" || {
+                        echo "ERROR: $NODE_FILE not found"
+                        exit 1
+                    }
 
-                    sed -i -E 's/^  "version": "[^"]+",/  "version": "'${ENV_VERSION}'",/' "$envFile"
+                    python3 - "$ENV_FILE" "$NODE_FILE" \
+                        "$ENVIRONMENT" "$NODE" \
+                        "$ENV_APPNAME" "$ENV_VERSION" "$ENV_REPLICAS" \
+                        "$ENV_LOGLEVEL" "$NODE_NAME" "$NODE_TYPE" \
+                        "$NODE_REGION" "$NODE_AZ" <<'PY'
+import json
+import sys
 
-                    sed -i -E 's/^  "replicas": [0-9]+(\\.[0-9]+)?,/  "replicas": '${ENV_REPLICAS}',/' "$envFile"
+(
+    env_file, node_file, environment, node,
+    app_name, new_version, replicas, log_level,
+    node_name, node_type, region, az
+) = sys.argv[1:]
 
-                    sed -i -E 's/^  "logLevel": "[^"]+",/  "logLevel": "'${ENV_LOGLEVEL}'",/' "$envFile"
+def read_json(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
+def write_json(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+        f.write("\\n")
 
-                    echo "Updating Node JSON..."
+def version_tuple(value):
+    parts = value.split(".")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        raise ValueError(
+            f"Invalid version '{value}'. Use MAJOR.MINOR.PATCH, e.g. 3.0.1"
+        )
+    return tuple(int(p) for p in parts)
 
-                    nodeFile="node/${NODE}.json"
+env_data = read_json(env_file)
+node_data = read_json(node_file)
 
-                    sed -i -E 's/^  "environment": "[^"]+",/  "environment": "'${NODE}'",/' "$nodeFile"
+old_version = str(env_data.get("version", "0.0.0"))
 
-                    sed -i -E 's/^  "nodeName": "[^"]+",/  "nodeName": "'${NODE_NAME}'",/' "$nodeFile"
+if version_tuple(new_version) <= version_tuple(old_version):
+    raise SystemExit(
+        f"ERROR: New version {new_version} must be greater than "
+        f"current version {old_version}"
+    )
 
-                    sed -i -E 's/^  "nodeType": "[^"]+",/  "nodeType": "'${NODE_TYPE}'",/' "$nodeFile"
+if not replicas.isdigit() or int(replicas) < 1:
+    raise SystemExit("ERROR: Replicas must be a positive integer")
 
-                    sed -i -E 's/^  "region": "[^"]+",/  "region": "'${NODE_REGION}'",/' "$nodeFile"
+env_data["environment"] = environment
+env_data["appName"] = app_name
+env_data["version"] = new_version
+env_data["replicas"] = int(replicas)
+env_data["logLevel"] = log_level
 
-                    sed -i -E 's/^  "availabilityZone": "[^"]+",/  "availabilityZone": "'${NODE_AZ}'",/' "$nodeFile"
+node_data["environment"] = environment
+node_data["nodeName"] = node_name
+node_data["nodeType"] = node_type
+node_data["region"] = region
+node_data["availabilityZone"] = az
 
+write_json(env_file, env_data)
+write_json(node_file, node_data)
 
-                    echo "Updated Environment File:"
-                    cat "$envFile"
+print(f"Environment version: {old_version} -> {new_version}")
+print(f"Updated: {env_file}")
+print(f"Updated: {node_file}")
+PY
 
-                    echo "Updated Node File:"
-                    cat "$nodeFile"
+                    python3 -m json.tool "$ENV_FILE" >/dev/null
+                    python3 -m json.tool "$NODE_FILE" >/dev/null
+
+                    echo "Updated Environment JSON:"
+                    cat "$ENV_FILE"
+                    echo "Updated Node JSON:"
+                    cat "$NODE_FILE"
                 '''
             }
         }
@@ -160,16 +157,16 @@ pipeline {
         stage('SonarQube Analysis') {
             steps {
                 script {
-
                     def scannerHome = tool 'SonarQube-Scanner'
 
                     withSonarQubeEnv('SonarQube-Server') {
-
                         sh """
-                            ${scannerHome}/bin/sonar-scanner \
-                              -Dsonar.projectKey=jenkins-config-automation \
-                              -Dsonar.projectName=jenkins-config-automation \
-                              -Dsonar.sources=.
+                            set -eu
+                            "${scannerHome}/bin/sonar-scanner" \
+                              -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                              -Dsonar.projectName=${SONAR_PROJECT_KEY} \
+                              -Dsonar.sources=environment,node \
+                              -Dsonar.scm.disabled=false
                         """
                     }
                 }
@@ -180,8 +177,7 @@ pipeline {
             steps {
                 sh '''
                     echo "Git Status:"
-                    git status
-
+                    git status --short
                     echo "Git Diff:"
                     git diff
                 '''
@@ -191,14 +187,15 @@ pipeline {
         stage('Commit Changes') {
             steps {
                 sh '''
-                    git add environment/ node/
+                    set -eu
+                    git add "environment/${ENVIRONMENT}.json" "node/${NODE}.json"
 
-                    if git diff --cached --quiet
-                    then
-                        echo "No changes to commit."
-                    else
-                        git commit -m "Update ${ENVIRONMENT} and ${NODE} configuration"
+                    if git diff --cached --quiet; then
+                        echo "ERROR: No JSON changes found. Stopping before PR."
+                        exit 1
                     fi
+
+                    git commit -m "Update ${ENVIRONMENT}/${NODE} to ${ENV_VERSION}"
                 '''
             }
         }
@@ -212,11 +209,10 @@ pipeline {
                         passwordVariable: 'GIT_PASSWORD'
                     )
                 ]) {
-
                     sh '''
-                        git remote set-url origin https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/chvkarthik-87/jenkins-config-automation.git
-
-                        git push origin feature/config-update --force
+                        set -eu
+                        git -c http.extraheader="AUTHORIZATION: basic $(printf '%s:%s' "$GIT_USERNAME" "$GIT_PASSWORD" | base64 -w 0)" \
+                            push origin HEAD:"$FEATURE_BRANCH" --force
                     '''
                 }
             }
@@ -231,64 +227,58 @@ pipeline {
                         passwordVariable: 'GIT_PASSWORD'
                     )
                 ]) {
-
                     script {
+                        sh '''
+                            set -eu
+                            curl --fail --silent --show-error \
+                              -u "$GIT_USERNAME:$GIT_PASSWORD" \
+                              -H "Accept: application/vnd.github+json" \
+                              "$GITHUB_API/pulls?head=chvkarthik-87:${FEATURE_BRANCH}&base=main" \
+                              -o existing-pr.json
 
-                        def prNumber = sh(
-                            script: '''
-                                curl -s \
-                                -u "$GIT_USERNAME:$GIT_PASSWORD" \
-                                -H "Accept: application/vnd.github+json" \
-                                "https://api.github.com/repos/chvkarthik-87/jenkins-config-automation/pulls?head=chvkarthik-87:feature/config-update&base=main" \
-                                | grep -o '"number"[[:space:]]*:[[:space:]]*[0-9]*' \
-                                | head -1 \
-                                | sed 's/[^0-9]//g'
-                            ''',
-                            returnStdout: true
-                        ).trim()
+                            python3 -c '
+import json
+with open("existing-pr.json") as f:
+    prs = json.load(f)
+print(prs[0]["number"] if prs else "")
+' > pr-number.txt
 
-                        if (prNumber) {
+                            PR_NUMBER=$(cat pr-number.txt)
 
-                            echo "Existing Pull Request found: #${prNumber}"
+                            if [ -z "$PR_NUMBER" ]; then
+                                echo "Creating Pull Request..."
 
-                            env.PR_NUMBER = prNumber
+                                curl --fail --silent --show-error \
+                                  -u "$GIT_USERNAME:$GIT_PASSWORD" \
+                                  -X POST \
+                                  -H "Accept: application/vnd.github+json" \
+                                  -H "Content-Type: application/json" \
+                                  -d "{\"title\":\"Automated configuration update\",\"body\":\"Created by Jenkins build\",\"head\":\"${FEATURE_BRANCH}\",\"base\":\"main\"}" \
+                                  "$GITHUB_API/pulls" \
+                                  -o created-pr.json
 
-                        } else {
+                                python3 -c '
+import json
+with open("created-pr.json") as f:
+    pr = json.load(f)
+if "number" not in pr:
+    raise SystemExit("GitHub did not return a PR number: " + str(pr))
+print(pr["number"])
+' > pr-number.txt
+                            else
+                                echo "Using existing PR #$PR_NUMBER"
+                            fi
 
-                            echo "No existing Pull Request found."
-                            echo "Creating new Pull Request..."
+                            echo "Pull Request number: $(cat pr-number.txt)"
+                        '''
 
-                            def response = sh(
-                                script: '''
-                                    curl -s \
-                                    -u "$GIT_USERNAME:$GIT_PASSWORD" \
-                                    -X POST \
-                                    -H "Accept: application/vnd.github+json" \
-                                    -H "Content-Type: application/json" \
-                                    -d '{"title":"Automated configuration update","body":"Automated Jenkins configuration update","head":"feature/config-update","base":"main"}' \
-                                    "https://api.github.com/repos/chvkarthik-87/jenkins-config-automation/pulls"
-                                ''',
-                                returnStdout: true
-                            ).trim()
+                        env.PR_NUMBER = readFile('pr-number.txt').trim()
 
-                            prNumber = sh(
-                                script: """
-                                    echo '${response}' \
-                                    | grep -o '"number"[[:space:]]*:[[:space:]]*[0-9]*' \
-                                    | head -1 \
-                                    | sed 's/[^0-9]//g'
-                                """,
-                                returnStdout: true
-                            ).trim()
-
-                            if (!prNumber) {
-                                error "Failed to create Pull Request."
-                            }
-
-                            echo "Created Pull Request: #${prNumber}"
-
-                            env.PR_NUMBER = prNumber
+                        if (!env.PR_NUMBER.isInteger()) {
+                            error('Could not determine Pull Request number.')
                         }
+
+                        echo "Pull Request: #${env.PR_NUMBER}"
                     }
                 }
             }
@@ -296,8 +286,32 @@ pipeline {
 
         stage('Check Pull Request') {
             steps {
-                echo "Pull Request Number: ${env.PR_NUMBER}"
-                echo "Pull Request is ready for merge."
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'github-jenkins-token',
+                        usernameVariable: 'GIT_USERNAME',
+                        passwordVariable: 'GIT_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+                        curl --fail --silent --show-error \
+                          -u "$GIT_USERNAME:$GIT_PASSWORD" \
+                          -H "Accept: application/vnd.github+json" \
+                          "$GITHUB_API/pulls/${PR_NUMBER}" \
+                          -o pr-details.json
+
+                        python3 -c '
+import json
+with open("pr-details.json") as f:
+    pr = json.load(f)
+print("PR state:", pr.get("state"))
+print("PR mergeable:", pr.get("mergeable"))
+if pr.get("state") != "open":
+    raise SystemExit("Pull Request is not open")
+'
+                    '''
+                }
             }
         }
 
@@ -310,20 +324,26 @@ pipeline {
                         passwordVariable: 'GIT_PASSWORD'
                     )
                 ]) {
-
                     sh '''
-                        echo "Merging Pull Request #${PR_NUMBER}..."
+                        set -eu
+                        curl --fail --silent --show-error \
+                          -u "$GIT_USERNAME:$GIT_PASSWORD" \
+                          -X PUT \
+                          -H "Accept: application/vnd.github+json" \
+                          -H "Content-Type: application/json" \
+                          -d '{"commit_title":"Automated configuration update","merge_method":"squash"}' \
+                          "$GITHUB_API/pulls/${PR_NUMBER}/merge" \
+                          -o merge-result.json
 
-                        curl -s \
-                        -u "$GIT_USERNAME:$GIT_PASSWORD" \
-                        -X PUT \
-                        -H "Accept: application/vnd.github+json" \
-                        -H "Content-Type: application/json" \
-                        -d '{"merge_method":"merge","commit_title":"Automated configuration update"}' \
-                        "https://api.github.com/repos/chvkarthik-87/jenkins-config-automation/pulls/${PR_NUMBER}/merge"
-
-                        echo ""
-                        echo "Pull Request merge request completed."
+                        python3 -c '
+import json
+with open("merge-result.json") as f:
+    result = json.load(f)
+if result.get("merged") is not True:
+    raise SystemExit("GitHub did not confirm merge: " + str(result))
+print("Pull Request merged:", result.get("merged"))
+print("Message:", result.get("message"))
+'
                     '''
                 }
             }
@@ -331,7 +351,6 @@ pipeline {
 
         stage('Verify Main Branch') {
             steps {
-
                 withCredentials([
                     usernamePassword(
                         credentialsId: 'github-jenkins-token',
@@ -339,53 +358,61 @@ pipeline {
                         passwordVariable: 'GIT_PASSWORD'
                     )
                 ]) {
-
                     sh '''
-                        echo "Fetching latest main branch..."
-
+                        set -eu
                         git fetch origin main
+                        git checkout -B main origin/main
 
-                        git checkout main
-
-                        git reset --hard origin/main
-
-                        echo "======================================"
-                        echo "MAIN BRANCH CONTENT"
-                        echo "======================================"
-
-                        echo "Environment JSON:"
-                        cat environment/${ENVIRONMENT}.json
-
-                        echo ""
-                        echo "Node JSON:"
-                        cat node/${NODE}.json
-
-                        echo ""
-                        echo "Latest Commit:"
+                        echo "Latest main commit:"
                         git log -1 --oneline
+
+                        echo "Verify merged version:"
+                        python3 - "environment/${ENVIRONMENT}.json" "$ENV_VERSION" <<'PY'
+import json
+import sys
+
+path, expected = sys.argv[1:]
+with open(path, encoding="utf-8") as f:
+    data = json.load(f)
+
+actual = str(data.get("version", ""))
+print("Expected version:", expected)
+print("Main branch version:", actual)
+
+if actual != expected:
+    raise SystemExit("ERROR: Expected version was not found on main")
+PY
                     '''
                 }
+            }
+        }
+
+        stage('Archive Configuration Artifact') {
+            steps {
+                sh '''
+                    set -eu
+                    mkdir -p artifacts
+                    zip -j "artifacts/config-${ENVIRONMENT}-${ENV_VERSION}.zip" \
+                        "environment/${ENVIRONMENT}.json" \
+                        "node/${NODE}.json"
+                    ls -lh artifacts/
+                '''
+                archiveArtifacts artifacts: 'artifacts/*.zip', fingerprint: true
             }
         }
     }
 
     post {
-
         success {
-            echo "======================================"
-            echo "PIPELINE COMPLETED SUCCESSFULLY"
-            echo "======================================"
-            echo "Environment : ${params.ENVIRONMENT}"
-            echo "Node        : ${params.NODE}"
-            echo "Feature     : ${FEATURE_BRANCH}"
-            echo "Main branch updated successfully."
+            echo 'PIPELINE SUCCESSFUL'
+            echo 'JSON update, SonarQube, PR merge, verification and artifact archive completed.'
         }
-
         failure {
-            echo "======================================"
-            echo "PIPELINE FAILED"
-            echo "======================================"
-            echo "Please check the Console Output."
+            echo 'PIPELINE FAILED'
+            echo 'Open Console Output and check the first ERROR message.'
+        }
+        always {
+            sh 'rm -f existing-pr.json created-pr.json pr-number.txt pr-details.json merge-result.json || true'
         }
     }
 }
