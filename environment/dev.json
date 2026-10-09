@@ -1,19 +1,19 @@
 {
     "environment": "dev",
     "appName": "myapp",
-    "version": "3.0.0",
+    "version": "3.0.1",
     "replicas": 1,
     "logLevel": "INFO",
-    "database":     {
+    "database": {
         "host": "dev-db.example.com",
         "port": 5432,
         "name": "myapp_dev"
     },
-    "resources":     {
+    "resources": {
         "cpu": "250m",
         "memory": "256Mi"
     },
-    "features":     {
+    "features": {
         "debug": true,
         "maintenanceMode": false
     }

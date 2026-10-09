@@ -6,16 +6,16 @@
     "availabilityZone": "us-east-1a",
     "instanceType": "t3.micro",
     "os": "Amazon Linux 2023",
-    "kubernetes":     {
+    "kubernetes": {
         "role": "worker",
         "version": "1.36"
     },
-    "resources":     {
+    "resources": {
         "cpu": "2",
         "memory": "1Gi",
         "disk": "20Gi"
     },
-    "labels":     {
+    "labels": {
         "environment": "dev",
         "team": "development"
     },
