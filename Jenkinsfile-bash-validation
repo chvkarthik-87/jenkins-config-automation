@@ -1,10 +1,19 @@
 pipeline {
     agent any
 
+    environment {
+        REPO_OWNER = 'chvkarthik-87'
+        REPO_NAME  = 'jenkins-config-automation'
+        SOURCE_BRANCH = 'feature/config-update'
+        TARGET_BRANCH = 'main'
+        GITHUB_API = 'https://api.github.com/repos/chvkarthik-87/jenkins-config-automation'
+    }
+
     stages {
         stage('Checkout Feature Branch') {
             steps {
                 dir('source') {
+                    deleteDir()
                     git branch: 'feature/config-update',
                         url: 'https://github.com/chvkarthik-87/jenkins-config-automation.git'
                 }
@@ -51,14 +60,145 @@ pipeline {
                 }
             }
         }
+
+        stage('Create or Reuse GitHub PR') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'github-jenkins-token',
+                        usernameVariable: 'GH_USER',
+                        passwordVariable: 'GH_TOKEN'
+                    )
+                ]) {
+                    dir('source') {
+                        sh '''
+                            set -eu
+
+                            echo "Searching for an open PR..."
+
+                            curl -fsS \
+                                -H "Accept: application/vnd.github+json" \
+                                -H "Authorization: Bearer $GH_TOKEN" \
+                                -H "X-GitHub-Api-Version: 2022-11-28" \
+                                "$GITHUB_API/pulls?state=open&head=$REPO_OWNER:$SOURCE_BRANCH&base=$TARGET_BRANCH" \
+                                -o open_prs.json
+
+                            PR_NUMBER=$(python3 -c \
+                                'import json; p=json.load(open("open_prs.json")); print(p[0]["number"] if p else "")')
+
+                            if [ -z "$PR_NUMBER" ]; then
+                                echo "No open PR found. Creating a new PR..."
+
+                                cat > pr_payload.json <<'JSON'
+{
+  "title": "Bash validation: feature/config-update to main",
+  "body": "Automated pull request created by Jenkins after Bash syntax and formatting validation.",
+  "head": "feature/config-update",
+  "base": "main"
+}
+JSON
+
+                                HTTP_CODE=$(curl -sS \
+                                    -o pr_response.json \
+                                    -w '%{http_code}' \
+                                    -X POST \
+                                    -H "Accept: application/vnd.github+json" \
+                                    -H "Authorization: Bearer $GH_TOKEN" \
+                                    -H "X-GitHub-Api-Version: 2022-11-28" \
+                                    "$GITHUB_API/pulls" \
+                                    -d @pr_payload.json)
+
+                                if [ "$HTTP_CODE" != "201" ]; then
+                                    echo "ERROR: GitHub PR creation failed. HTTP $HTTP_CODE"
+                                    python3 -c 'import json; print(json.dumps(json.load(open("pr_response.json")), indent=2))'
+                                    exit 1
+                                fi
+
+                                PR_NUMBER=$(python3 -c \
+                                    'import json; print(json.load(open("pr_response.json"))["number"])')
+
+                                echo "Created PR #$PR_NUMBER"
+                            else
+                                echo "Reusing existing open PR #$PR_NUMBER"
+                            fi
+
+                            echo "$PR_NUMBER" > pr_number.txt
+                        '''
+
+                        script {
+                            env.PR_NUMBER = readFile('pr_number.txt').trim()
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Merge PR into Main') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'github-jenkins-token',
+                        usernameVariable: 'GH_USER',
+                        passwordVariable: 'GH_TOKEN'
+                    )
+                ]) {
+                    dir('source') {
+                        sh '''
+                            set -eu
+
+                            if [ -z "${PR_NUMBER:-}" ]; then
+                                echo "ERROR: PR number is missing."
+                                exit 1
+                            fi
+
+                            echo "Merging PR #$PR_NUMBER..."
+
+                            cat > merge_payload.json <<'JSON'
+{
+  "merge_method": "squash"
+}
+JSON
+
+                            HTTP_CODE=$(curl -sS \
+                                -o merge_response.json \
+                                -w '%{http_code}' \
+                                -X PUT \
+                                -H "Accept: application/vnd.github+json" \
+                                -H "Authorization: Bearer $GH_TOKEN" \
+                                -H "X-GitHub-Api-Version: 2022-11-28" \
+                                "$GITHUB_API/pulls/$PR_NUMBER/merge" \
+                                -d @merge_payload.json)
+
+                            if [ "$HTTP_CODE" != "200" ]; then
+                                echo "ERROR: GitHub merge failed. HTTP $HTTP_CODE"
+                                python3 -c 'import json; print(json.dumps(json.load(open("merge_response.json")), indent=2))'
+                                exit 1
+                            fi
+
+                            python3 -c '
+import json, sys
+data = json.load(open("merge_response.json"))
+if data.get("merged") is not True:
+    print("ERROR: GitHub did not confirm the merge.")
+    print(json.dumps(data, indent=2))
+    sys.exit(1)
+print("GitHub confirmed the PR merge.")
+'
+
+                            echo "PR #$PR_NUMBER merged successfully."
+                        '''
+                    }
+                }
+            }
+        }
     }
 
     post {
         success {
-            echo 'SUCCESS: Bash syntax and formatting checks passed.'
+            echo 'SUCCESS: Bash checks passed and the GitHub PR was merged.'
         }
         failure {
-            echo 'ERROR: Bash validation failed. Check the console output.'
+            echo 'ERROR: Pipeline failed. Check the stage output; merge is attempted only after both Bash checks and PR setup succeed.'
         }
     }
 }
