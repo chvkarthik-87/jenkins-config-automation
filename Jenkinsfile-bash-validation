@@ -1,0 +1,38 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('Check Bash Script') {
+            steps {
+                dir('source') {
+                    git branch: 'feature/config-update',
+                        url: 'https://github.com/chvkarthik-87/jenkins-config-automation.git'
+
+                    sh '''
+                        set -eu
+
+                        echo "Checking deploy.sh..."
+
+                        if [ ! -f deploy.sh ]; then
+                            echo "ERROR: deploy.sh not found"
+                            exit 1
+                        fi
+
+                        bash -n deploy.sh
+
+                        echo "Bash syntax validation passed."
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Bash validation successful.'
+        }
+        failure {
+            echo 'Bash validation failed. Check the console output.'
+        }
+    }
+}
