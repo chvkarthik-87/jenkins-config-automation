@@ -4,14 +4,16 @@ pipeline {
     parameters {
         choice(name: 'ENVIRONMENT', choices: ['dev', 'stage', 'uat', 'prod'], description: 'Select environment')
         choice(name: 'NODE', choices: ['dev', 'stage', 'uat', 'prod'], description: 'Select node configuration')
-        string(name: 'ENV_APPNAME', defaultValue: 'myapp', description: 'Application name')
+
+        string(name: 'ENV_APPNAME', defaultValue: 'myapp', description: 'Enter new application name')
         string(name: 'ENV_VERSION', defaultValue: '2.0.0', description: 'Enter new version')
-        string(name: 'ENV_REPLICAS', defaultValue: '1', description: 'Number of replicas')
-        choice(name: 'ENV_LOGLEVEL', choices: ['INFO', 'DEBUG', 'WARN', 'ERROR'], description: 'Application log level')
-        string(name: 'NODE_NAME', defaultValue: 'node-01', description: 'Node name')
-        choice(name: 'NODE_TYPE', choices: ['worker', 'master'], description: 'Node type')
-        string(name: 'NODE_REGION', defaultValue: 'us-east-1', description: 'AWS region')
-        string(name: 'NODE_AZ', defaultValue: 'us-east-1a', description: 'Availability zone')
+        string(name: 'ENV_REPLICAS', defaultValue: '1', description: 'Enter number of replicas')
+        choice(name: 'ENV_LOGLEVEL', choices: ['INFO', 'DEBUG', 'WARN', 'ERROR'], description: 'Select application log level')
+
+        string(name: 'NODE_NAME', defaultValue: 'node-01', description: 'Enter new node name')
+        choice(name: 'NODE_TYPE', choices: ['worker', 'master'], description: 'Select node type')
+        string(name: 'NODE_REGION', defaultValue: 'us-east-1', description: 'Enter AWS region')
+        string(name: 'NODE_AZ', defaultValue: 'us-east-1a', description: 'Enter availability zone')
     }
 
     tools {
@@ -40,21 +42,18 @@ pipeline {
             }
         }
 
-        stage('Read Current Version') {
+        stage('Read Current Configuration') {
             steps {
                 script {
                     env.SELECTED_ENV = params.ENVIRONMENT.toString().trim()
                     env.SELECTED_NODE = params.NODE.toString().trim()
-                    env.NEW_VERSION = params.ENV_VERSION.toString().trim()
 
                     if (!(env.SELECTED_ENV in ['dev', 'stage', 'uat', 'prod'])) {
-                        error('Select a valid environment.')
+                        error('Invalid environment selected.')
                     }
+
                     if (!(env.SELECTED_NODE in ['dev', 'stage', 'uat', 'prod'])) {
-                        error('Select a valid node.')
-                    }
-                    if (!env.NEW_VERSION) {
-                        error('ENV_VERSION cannot be empty.')
+                        error('Invalid node selected.')
                     }
 
                     env.OLD_VERSION = sh(
@@ -66,13 +65,89 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
-                    echo "Environment: ${env.SELECTED_ENV}"
-                    echo "Node: ${env.SELECTED_NODE}"
-                    echo "Current version: ${env.OLD_VERSION}"
-                    echo "New version: ${env.NEW_VERSION}"
+                    env.OLD_APPNAME = sh(
+                        script: """
+                            git show origin/main:environment/${env.SELECTED_ENV}.json |
+                            python3 -c "import json,sys; print(json.load(sys.stdin)['appName'])"
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    env.OLD_REPLICAS = sh(
+                        script: """
+                            git show origin/main:environment/${env.SELECTED_ENV}.json |
+                            python3 -c "import json,sys; print(json.load(sys.stdin)['replicas'])"
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    env.OLD_LOGLEVEL = sh(
+                        script: """
+                            git show origin/main:environment/${env.SELECTED_ENV}.json |
+                            python3 -c "import json,sys; print(json.load(sys.stdin)['logLevel'])"
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    env.OLD_NODE_NAME = sh(
+                        script: """
+                            git show origin/main:node/${env.SELECTED_NODE}.json |
+                            python3 -c "import json,sys; print(json.load(sys.stdin)['name'])"
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    env.OLD_NODE_TYPE = sh(
+                        script: """
+                            git show origin/main:node/${env.SELECTED_NODE}.json |
+                            python3 -c "import json,sys; print(json.load(sys.stdin)['type'])"
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    env.OLD_NODE_REGION = sh(
+                        script: """
+                            git show origin/main:node/${env.SELECTED_NODE}.json |
+                            python3 -c "import json,sys; print(json.load(sys.stdin)['region'])"
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    env.OLD_NODE_AZ = sh(
+                        script: """
+                            git show origin/main:node/${env.SELECTED_NODE}.json |
+                            python3 -c "import json,sys; print(json.load(sys.stdin)['availabilityZone'])"
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    env.NEW_VERSION = params.ENV_VERSION.toString().trim()
+
+                    if (!env.NEW_VERSION) {
+                        error('Enter a new version.')
+                    }
+
+                    echo '========== CURRENT CONFIGURATION =========='
+                    echo "Application: ${env.OLD_APPNAME}"
+                    echo "Version: ${env.OLD_VERSION}"
+                    echo "Replicas: ${env.OLD_REPLICAS}"
+                    echo "Log level: ${env.OLD_LOGLEVEL}"
+                    echo "Node name: ${env.OLD_NODE_NAME}"
+                    echo "Node type: ${env.OLD_NODE_TYPE}"
+                    echo "Region: ${env.OLD_NODE_REGION}"
+                    echo "Availability zone: ${env.OLD_NODE_AZ}"
+                    echo '========== NEW CONFIGURATION =========='
+                    echo "Application: ${params.ENV_APPNAME}"
+                    echo "Version: ${env.NEW_VERSION}"
+                    echo "Replicas: ${params.ENV_REPLICAS}"
+                    echo "Log level: ${params.ENV_LOGLEVEL}"
+                    echo "Node name: ${params.NODE_NAME}"
+                    echo "Node type: ${params.NODE_TYPE}"
+                    echo "Region: ${params.NODE_REGION}"
+                    echo "Availability zone: ${params.NODE_AZ}"
 
                     if (env.NEW_VERSION == env.OLD_VERSION) {
-                        error('New version must differ from the current version.')
+                        error('New version must differ from current version.')
                     }
                 }
             }
@@ -115,20 +190,24 @@ if replicas < 1:
 
 with open(env_file, encoding="utf-8") as f:
     env_data = json.load(f)
+
 env_data["appName"] = os.environ["APP_NAME"]
 env_data["version"] = os.environ["APP_VERSION"]
 env_data["replicas"] = replicas
 env_data["logLevel"] = os.environ["APP_LOGLEVEL"]
+
 with open(env_file, "w", encoding="utf-8") as f:
     json.dump(env_data, f, indent=2)
     f.write("\\n")
 
 with open(node_file, encoding="utf-8") as f:
     node_data = json.load(f)
+
 node_data["name"] = os.environ["CONFIG_NODE_NAME"]
 node_data["type"] = os.environ["CONFIG_NODE_TYPE"]
 node_data["region"] = os.environ["CONFIG_NODE_REGION"]
 node_data["availabilityZone"] = os.environ["CONFIG_NODE_AZ"]
+
 with open(node_file, "w", encoding="utf-8") as f:
     json.dump(node_data, f, indent=2)
     f.write("\\n")
@@ -166,7 +245,7 @@ PY
                     if [ -f pom.xml ]; then
                         mvn -B clean package
                     else
-                        echo "No pom.xml found; no Maven project is available to compile."
+                        echo "No pom.xml found; Maven compilation skipped."
                     fi
                 '''
             }
@@ -199,13 +278,11 @@ PY
 
         stage('Push Feature Branch') {
             steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'github-jenkins-token',
-                        usernameVariable: 'GITHUB_USER',
-                        passwordVariable: 'GITHUB_TOKEN'
-                    )
-                ]) {
+                withCredentials([usernamePassword(
+                    credentialsId: 'github-jenkins-token',
+                    usernameVariable: 'GITHUB_USER',
+                    passwordVariable: 'GITHUB_TOKEN'
+                )]) {
                     sh '''
                         set -eu
                         set +x
@@ -217,13 +294,11 @@ PY
 
         stage('Create or Get Pull Request') {
             steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'github-jenkins-token',
-                        usernameVariable: 'GITHUB_USER',
-                        passwordVariable: 'GITHUB_TOKEN'
-                    )
-                ]) {
+                withCredentials([usernamePassword(
+                    credentialsId: 'github-jenkins-token',
+                    usernameVariable: 'GITHUB_USER',
+                    passwordVariable: 'GITHUB_TOKEN'
+                )]) {
                     script {
                         env.PR_NUMBER = sh(
                             script: '''
@@ -283,13 +358,11 @@ PY
 
         stage('Merge Pull Request Automatically') {
             steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'github-jenkins-token',
-                        usernameVariable: 'GITHUB_USER',
-                        passwordVariable: 'GITHUB_TOKEN'
-                    )
-                ]) {
+                withCredentials([usernamePassword(
+                    credentialsId: 'github-jenkins-token',
+                    usernameVariable: 'GITHUB_USER',
+                    passwordVariable: 'GITHUB_TOKEN'
+                )]) {
                     sh '''
                         set -eu
                         set +x
@@ -332,13 +405,11 @@ PY
 
         stage('Upload Artifact to Nexus') {
             steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'nexus-admin-new',
-                        usernameVariable: 'NEXUS_USER',
-                        passwordVariable: 'NEXUS_PASSWORD'
-                    )
-                ]) {
+                withCredentials([usernamePassword(
+                    credentialsId: 'nexus-admin-new',
+                    usernameVariable: 'NEXUS_USER',
+                    passwordVariable: 'NEXUS_PASSWORD'
+                )]) {
                     sh '''
                         set -eu
                         set +x
