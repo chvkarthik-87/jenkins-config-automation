@@ -2,18 +2,26 @@ pipeline {
     agent any
 
     parameters {
-        choice(name: 'ENVIRONMENT',
-               choices: ['dev', 'stage', 'uat', 'prod'],
-               description: 'Select environment')
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['dev', 'stage', 'uat', 'prod'],
+            description: 'Select environment'
+        )
 
-        choice(name: 'NODE',
-               choices: ['dev', 'stage', 'uat', 'prod'],
-               description: 'Select node')
+        choice(
+            name: 'NODE',
+            choices: ['dev', 'stage', 'uat', 'prod'],
+            description: 'Select node'
+        )
+
+        string(
+            name: 'ENV_VERSION',
+            defaultValue: '',
+            description: 'Enter NEW version. Old version is read automatically from the selected environment JSON.'
+        )
 
         string(name: 'ENV_APPNAME', defaultValue: 'myapp',
                description: 'Application name')
-        string(name: 'ENV_VERSION', defaultValue: '2.0.3',
-               description: 'New version')
         string(name: 'ENV_REPLICAS', defaultValue: '1',
                description: 'Number of replicas')
         string(name: 'ENV_LOGLEVEL', defaultValue: 'INFO',
@@ -24,7 +32,7 @@ pipeline {
         string(name: 'NODE_TYPE', defaultValue: 'worker',
                description: 'Node type')
         string(name: 'NODE_REGION', defaultValue: 'us-east-1',
-               description: 'AWS region')
+               description: 'Node region')
         string(name: 'NODE_AZ', defaultValue: 'us-east-1a',
                description: 'Availability zone')
     }
@@ -41,7 +49,7 @@ pipeline {
             steps {
                 echo "Environment: ${params.ENVIRONMENT}"
                 echo "Node: ${params.NODE}"
-                echo "Requested version: ${params.ENV_VERSION}"
+                echo "Requested new version: ${params.ENV_VERSION}"
             }
         }
 
@@ -58,10 +66,11 @@ pipeline {
             }
         }
 
-        stage('Read Last Updated Version') {
+        stage('Read Old Version and Validate New Version') {
             steps {
                 script {
-                    def envFile = "environment/${params.ENVIRONMENT}.json"
+                    def envFile =
+                        "environment/${params.ENVIRONMENT}.json"
 
                     if (!fileExists(envFile)) {
                         error("Environment file not found: ${envFile}")
@@ -70,16 +79,53 @@ pipeline {
                     def config = readJSON(file: envFile)
 
                     if (config.version == null) {
-                        error("The version field is missing in ${envFile}")
+                        error("Version field missing in ${envFile}")
                     }
 
                     env.LAST_VERSION = config.version.toString()
+                    env.NEW_VERSION = params.ENV_VERSION.trim()
 
-                    echo "Previous version: ${env.LAST_VERSION}"
-                    echo "Requested version: ${params.ENV_VERSION}"
+                    echo '===================================='
+                    echo "Environment : ${params.ENVIRONMENT}"
+                    echo "Old Version : ${env.LAST_VERSION}"
+                    echo "New Version : ${env.NEW_VERSION}"
+                    echo '===================================='
 
-                    if (env.LAST_VERSION == params.ENV_VERSION) {
-                        error('This version is already configured. Enter a different version.')
+                    if (!env.NEW_VERSION) {
+                        error('Enter the new version in Build with Parameters.')
+                    }
+
+                    if (!(env.NEW_VERSION ==~ /^\d+\.\d+\.\d+$/)) {
+                        error('Enter version in format X.Y.Z, for example 2.0.3')
+                    }
+
+                    if (env.LAST_VERSION == env.NEW_VERSION) {
+                        error("New version is already ${env.LAST_VERSION}. Enter another version.")
+                    }
+
+                    def oldParts = env.LAST_VERSION.tokenize('.')
+                    def newParts = env.NEW_VERSION.tokenize('.')
+
+                    if (oldParts.size() == 3 &&
+                        oldParts.every { it ==~ /^\d+$/ }) {
+                        def oldNums = oldParts.collect { it.toInteger() }
+                        def newNums = newParts.collect { it.toInteger() }
+
+                        def comparison = 0
+                        for (int i = 0; i < 3; i++) {
+                            if (newNums[i] > oldNums[i]) {
+                                comparison = 1
+                                break
+                            }
+                            if (newNums[i] < oldNums[i]) {
+                                comparison = -1
+                                break
+                            }
+                        }
+
+                        if (comparison < 0) {
+                            error("Version downgrade blocked: current ${env.LAST_VERSION}, requested ${env.NEW_VERSION}")
+                        }
                     }
                 }
             }
@@ -88,24 +134,23 @@ pipeline {
         stage('Update JSON Files') {
             steps {
                 script {
-                    if (!(params.ENV_REPLICAS ==~ /^[0-9]+$/)) {
+                    if (!(params.ENV_REPLICAS ==~ /^[0-9]+$/) ||
+                        params.ENV_REPLICAS.toInteger() < 1) {
                         error('ENV_REPLICAS must be a positive integer.')
                     }
 
-                    if (!params.ENV_VERSION?.trim()) {
-                        error('ENV_VERSION cannot be empty.')
-                    }
+                    def envFile =
+                        "environment/${params.ENVIRONMENT}.json"
+                    def nodeFile =
+                        "node/${params.NODE}.json"
 
-                    def envFile = "environment/${params.ENVIRONMENT}.json"
-                    def nodeFile = "node/${params.NODE}.json"
-
-                    if (!fileExists(envFile) || !fileExists(nodeFile)) {
-                        error('Selected environment or node JSON file does not exist.')
+                    if (!fileExists(nodeFile)) {
+                        error("Node file not found: ${nodeFile}")
                     }
 
                     def envJson = readJSON(file: envFile)
                     envJson.appName = params.ENV_APPNAME
-                    envJson.version = params.ENV_VERSION
+                    envJson.version = env.NEW_VERSION
                     envJson.replicas = params.ENV_REPLICAS.toInteger()
                     envJson.logLevel = params.ENV_LOGLEVEL
 
@@ -127,7 +172,7 @@ pipeline {
                         pretty: 4
                     )
 
-                    echo 'Environment and node JSON files updated.'
+                    echo 'Environment and node JSON updated.'
                 }
             }
         }
@@ -167,6 +212,7 @@ pipeline {
                     set -eu
                     git config user.name "Jenkins Automation"
                     git config user.email "jenkins@example.com"
+
                     git checkout -B "$FEATURE_BRANCH"
                     git add environment/ node/
                     git diff --cached --check
@@ -183,16 +229,16 @@ pipeline {
                     )
 
                     if (status == 0) {
-                        error('No changes detected. Check the parameters and selected JSON files.')
+                        error('No changes detected in selected JSON files.')
                     }
 
                     if (status != 1) {
-                        error('Unable to check staged changes.')
+                        error('Could not check staged changes.')
                     }
                 }
 
                 sh '''
-                    git commit -m "Update ${ENVIRONMENT}/${NODE} configuration to ${ENV_VERSION}"
+                    git commit -m "Update ${ENVIRONMENT}/${NODE} to ${NEW_VERSION}"
                 '''
             }
         }
@@ -208,7 +254,7 @@ pipeline {
                         set +x
                         set -eu
 
-                        ASKPASS_FILE="$(mktemp)"
+                        ASKPASS_FILE=$(mktemp)
                         trap 'rm -f "$ASKPASS_FILE"' EXIT
 
                         cat > "$ASKPASS_FILE" <<'EOF'
@@ -253,7 +299,7 @@ EOF
 
                                 if [ "$CODE" != "200" ]; then
                                     cat "$RESPONSE"
-                                    echo "Could not check existing PRs. HTTP $CODE"
+                                    echo "PR lookup failed. HTTP $CODE"
                                     exit 1
                                 fi
 
@@ -264,7 +310,7 @@ EOF
 
                         if (existingPR) {
                             env.PR_NUMBER = existingPR
-                            echo "Found existing pull request #${env.PR_NUMBER}"
+                            echo "Existing PR: #${env.PR_NUMBER}"
                         } else {
                             def newPR = sh(
                                 script: '''
@@ -294,11 +340,11 @@ EOF
                             ).trim()
 
                             env.PR_NUMBER = newPR
-                            echo "Created pull request #${env.PR_NUMBER}"
+                            echo "Created PR: #${env.PR_NUMBER}"
                         }
 
                         if (!(env.PR_NUMBER ==~ /^[0-9]+$/)) {
-                            error('GitHub did not return a valid pull request number.')
+                            error('Invalid pull request number returned by GitHub.')
                         }
                     }
                 }
@@ -329,7 +375,7 @@ EOF
 
                         if [ "$CODE" != "200" ]; then
                             cat "$RESPONSE"
-                            echo "Automatic merge failed. HTTP $CODE"
+                            echo "PR merge failed. HTTP $CODE"
                             exit 1
                         fi
 
@@ -349,10 +395,10 @@ EOF
                     echo "Latest main commit:"
                     git log -1 --oneline
 
-                    echo "Updated environment configuration:"
+                    echo "Updated environment JSON:"
                     cat "environment/${ENVIRONMENT}.json"
 
-                    echo "Updated node configuration:"
+                    echo "Updated node JSON:"
                     cat "node/${NODE}.json"
                 '''
             }
@@ -365,14 +411,17 @@ EOF
                     mkdir -p build-artifact
 
                     tar -czf \
-                      "build-artifact/config-${ENVIRONMENT}-${NODE}-${ENV_VERSION}.tar.gz" \
+                      "build-artifact/config-${ENVIRONMENT}-${NODE}-${NEW_VERSION}.tar.gz" \
                       "environment/${ENVIRONMENT}.json" \
                       "node/${NODE}.json"
 
                     ls -lh build-artifact/
                 '''
-                archiveArtifacts artifacts: 'build-artifact/*.tar.gz',
-                                 fingerprint: true
+
+                archiveArtifacts(
+                    artifacts: 'build-artifact/*.tar.gz',
+                    fingerprint: true
+                )
             }
         }
 
@@ -387,7 +436,7 @@ EOF
                         set +x
                         set -eu
 
-                        FILE="build-artifact/config-${ENVIRONMENT}-${NODE}-${ENV_VERSION}.tar.gz"
+                        FILE="build-artifact/config-${ENVIRONMENT}-${NODE}-${NEW_VERSION}.tar.gz"
                         RESPONSE=$(mktemp)
                         trap 'rm -f "$RESPONSE"' EXIT
 
@@ -397,7 +446,7 @@ EOF
                           "${NEXUS_URL}/service/rest/v1/components?repository=${NEXUS_REPO}" \
                           -F "maven2.groupId=com.chvkarthik.config" \
                           -F "maven2.artifactId=config-${ENVIRONMENT}-${NODE}" \
-                          -F "maven2.version=${ENV_VERSION}" \
+                          -F "maven2.version=${NEW_VERSION}" \
                           -F "maven2.generate-pom=true" \
                           -F "maven2.asset1=@${FILE}" \
                           -F "maven2.asset1.extension=tar.gz")
@@ -410,7 +459,7 @@ EOF
                             exit 1
                         fi
 
-                        echo "Artifact uploaded successfully to Nexus."
+                        echo "Artifact uploaded to Nexus successfully."
                     '''
                 }
             }
@@ -422,13 +471,13 @@ EOF
             echo 'Pipeline completed successfully.'
             echo "Environment: ${params.ENVIRONMENT}"
             echo "Node: ${params.NODE}"
-            echo "Previous version: ${env.LAST_VERSION}"
-            echo "Updated version: ${params.ENV_VERSION}"
+            echo "Old version: ${env.LAST_VERSION}"
+            echo "New version: ${env.NEW_VERSION}"
             echo "Pull request: ${env.PR_NUMBER}"
         }
 
         failure {
-            echo 'Pipeline failed. Check the first error in Console Output.'
+            echo 'Pipeline failed. Check Console Output for the first error.'
         }
     }
 }
