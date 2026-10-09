@@ -8,32 +8,32 @@ pipeline {
     }
 
     parameters {
-        choice(
-            name: 'ENVIRONMENT',
-            choices: ['dev', 'stage', 'uat', 'prod'],
-            description: 'Select environment configuration'
-        )
-        choice(
-            name: 'NODE',
-            choices: ['dev', 'stage', 'uat', 'prod'],
-            description: 'Select node configuration'
-        )
+        choice(name: 'ENVIRONMENT',
+               choices: ['dev', 'stage', 'uat', 'prod'],
+               description: 'Select environment')
 
-        string(name: 'ENV_APPNAME', defaultValue: 'my app',
+        choice(name: 'NODE',
+               choices: ['dev', 'stage', 'uat', 'prod'],
+               description: 'Select node')
+
+        string(name: 'ENV_APPNAME', defaultValue: 'myapp',
                description: 'Application name')
         string(name: 'ENV_VERSION', defaultValue: '2.3.1',
                description: 'Application version')
         string(name: 'ENV_REPLICAS', defaultValue: '3',
                description: 'Number of replicas')
+
         choice(name: 'ENV_LOGLEVEL',
                choices: ['INFO', 'DEBUG', 'WARN', 'ERROR'],
                description: 'Application log level')
 
         string(name: 'NODE_NAME', defaultValue: 'node-01',
                description: 'Node name')
+
         choice(name: 'NODE_TYPE',
                choices: ['worker', 'master'],
                description: 'Node type')
+
         string(name: 'NODE_REGION', defaultValue: 'us-east-1',
                description: 'AWS region')
         string(name: 'NODE_AZ', defaultValue: 'us-east-1a',
@@ -57,14 +57,9 @@ pipeline {
             steps {
                 deleteDir()
 
-                checkout([
-                    $class: 'GitSCM',
-                    branches: [[name: '*/main']],
-                    userRemoteConfigs: [[
-                        url: "${env.REPO_URL}",
-                        credentialsId: 'github-jenkins-token'
-                    ]]
-                ])
+                git branch: 'main',
+                    credentialsId: 'github-jenkins-token',
+                    url: "${REPO_URL}"
 
                 sh '''
                     set -eu
@@ -98,16 +93,25 @@ pipeline {
 
                     env.NEW_VERSION = params.ENV_VERSION.trim()
 
-                    if (!(env.NEW_VERSION ==~
-                        /[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?/)) {
-                        error('Invalid version format. Example: 2.3.1')
+                    // Simple validation; no Groovy regex syntax.
+                    if (!env.NEW_VERSION) {
+                        error('ENV_VERSION cannot be empty.')
+                    }
+
+                    if (env.NEW_VERSION.contains(' ')) {
+                        error('ENV_VERSION must not contain spaces.')
+                    }
+
+                    if (!(params.ENV_REPLICAS.isInteger()) ||
+                        params.ENV_REPLICAS.toInteger() < 1) {
+                        error('ENV_REPLICAS must be a positive integer.')
                     }
 
                     echo "Environment: ${params.ENVIRONMENT}"
                     echo "Node: ${params.NODE}"
                     echo "Current version: ${env.CURRENT_VERSION}"
                     echo "New version: ${env.NEW_VERSION}"
-                    echo "Current node: ${nodeJson.nodeName ?: nodeJson.name ?: 'Not set'}"
+                    echo "Current node name: ${nodeJson.nodeName ?: nodeJson.name ?: 'Not set'}"
                 }
             }
         }
@@ -117,14 +121,12 @@ pipeline {
                 script {
                     env.FEATURE_BRANCH =
                         "feature/config-${params.ENVIRONMENT}-${params.NODE}-${env.BUILD_NUMBER}"
-
-                    sh '''
-                        set -eu
-                        git checkout -b "$FEATURE_BRANCH"
-                    '''
-
-                    echo "Feature branch: ${env.FEATURE_BRANCH}"
                 }
+
+                sh '''
+                    set -eu
+                    git checkout -b "$FEATURE_BRANCH"
+                '''
             }
         }
 
@@ -161,13 +163,9 @@ with open(env_path, encoding="utf-8") as f:
 with open(node_path, encoding="utf-8") as f:
     node_data = json.load(f)
 
-try:
-    replicas = int(os.environ["APP_REPLICAS"])
-except ValueError:
-    raise SystemExit("ENV_REPLICAS must be a whole number")
-
+replicas = int(os.environ["APP_REPLICAS"])
 if replicas < 1:
-    raise SystemExit("ENV_REPLICAS must be at least 1")
+    raise SystemExit("APP_REPLICAS must be at least 1")
 
 env_data["appName"] = os.environ["APP_NAME"]
 env_data["version"] = os.environ["APP_VERSION"]
@@ -217,7 +215,6 @@ PY
                     withSonarQubeEnv('SonarQube-Server') {
                         sh """
                             set -eu
-
                             "${scannerHome}/bin/sonar-scanner" \
                               -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
                               -Dsonar.projectName=${SONAR_PROJECT_KEY} \
@@ -260,24 +257,22 @@ PY
 
         stage('Commit Changes') {
             steps {
-                script {
-                    sh '''
-                        set -eu
+                sh '''
+                    set -eu
 
-                        git add "environment/$ENVIRONMENT.json"
-                        git add "node/$NODE.json"
+                    git add "environment/$ENVIRONMENT.json"
+                    git add "node/$NODE.json"
 
-                        if git diff --cached --quiet; then
-                            echo "No configuration changes detected."
-                            exit 2
-                        fi
+                    if git diff --cached --quiet; then
+                        echo "No configuration changes detected."
+                        exit 1
+                    fi
 
-                        git config user.name "Jenkins Automation"
-                        git config user.email "jenkins-automation@users.noreply.github.com"
+                    git config user.name "Jenkins Automation"
+                    git config user.email "jenkins-automation@users.noreply.github.com"
 
-                        git commit -m "Update $ENVIRONMENT/$NODE configuration [build $BUILD_NUMBER]"
-                    '''
-                }
+                    git commit -m "Update $ENVIRONMENT/$NODE configuration [build $BUILD_NUMBER]"
+                '''
             }
         }
 
@@ -292,6 +287,7 @@ PY
                 ]) {
                     sh '''
                         set -eu
+                        set +x
 
                         AUTH=$(printf '%s:%s' "$GIT_USER" "$GIT_TOKEN" \
                             | base64 | tr -d '\\n')
@@ -331,8 +327,8 @@ branch = os.environ["FEATURE_BRANCH"]
 
 base_url = f"https://api.github.com/repos/{owner}/{repo}"
 
-def api_request(method, url, payload=None):
-    data = None if payload is None else json.dumps(payload).encode("utf-8")
+def request_api(method, url, payload=None):
+    data = None if payload is None else json.dumps(payload).encode()
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Authorization", f"Bearer {token}")
     req.add_header("Accept", "application/vnd.github+json")
@@ -341,15 +337,13 @@ def api_request(method, url, payload=None):
 
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
-            raw = response.read()
-            return json.loads(raw) if raw else {}
+            body = response.read()
+            return json.loads(body) if body else {}
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")
-        raise SystemExit(
-            f"GitHub API error: HTTP {e.code}: {detail}"
-        )
+        raise SystemExit(f"GitHub API HTTP {e.code}: {detail}")
 
-pulls = api_request(
+pulls = request_api(
     "GET",
     f"{base_url}/pulls?state=open&head={owner}:{branch}&base=main"
 )
@@ -357,7 +351,7 @@ pulls = api_request(
 if pulls:
     pr = pulls[0]
 else:
-    pr = api_request(
+    pr = request_api(
         "POST",
         f"{base_url}/pulls",
         {
@@ -371,8 +365,7 @@ else:
 with open("pr-number.txt", "w", encoding="utf-8") as f:
     f.write(str(pr["number"]))
 
-print(f"Pull request: {pr['html_url']}")
-print(f"Pull request number: {pr['number']}")
+print(f"Pull request created/found: {pr['html_url']}")
 PY
                     '''
                 }
@@ -399,51 +392,34 @@ PY
                         python3 - <<'PY'
 import json
 import os
-import time
 import urllib.error
 import urllib.request
 
 owner = os.environ["REPO_OWNER"]
 repo = os.environ["REPO_NAME"]
 token = os.environ["GITHUB_TOKEN"]
-pr_number = os.environ["PR_NUMBER"]
+number = os.environ["PR_NUMBER"]
 
-url = (
-    f"https://api.github.com/repos/{owner}/{repo}"
-    f"/pulls/{pr_number}/merge"
-)
+url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{number}/merge"
+payload = json.dumps({"merge_method": "squash"}).encode()
 
-payload = json.dumps({
-    "merge_method": "squash"
-}).encode("utf-8")
+req = urllib.request.Request(url, data=payload, method="PUT")
+req.add_header("Authorization", f"Bearer {token}")
+req.add_header("Accept", "application/vnd.github+json")
+req.add_header("X-GitHub-Api-Version", "2022-11-28")
+req.add_header("Content-Type", "application/json")
 
-for attempt in range(1, 6):
-    req = urllib.request.Request(url, data=payload, method="PUT")
-    req.add_header("Authorization", f"Bearer {token}")
-    req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("X-GitHub-Api-Version", "2022-11-28")
-    req.add_header("Content-Type", "application/json")
+try:
+    with urllib.request.urlopen(req, timeout=30) as response:
+        result = json.loads(response.read().decode())
+except urllib.error.HTTPError as e:
+    detail = e.read().decode("utf-8", errors="replace")
+    raise SystemExit(f"GitHub merge failed: HTTP {e.code}: {detail}")
 
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            result = json.loads(response.read().decode("utf-8"))
-            if result.get("merged"):
-                print("Pull request merged successfully.")
-                print(result.get("message", ""))
-                break
-            raise SystemExit(f"Merge was not completed: {result}")
+if not result.get("merged"):
+    raise SystemExit(f"PR was not merged: {result}")
 
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")
-        if e.code in (409, 405) and attempt < 5:
-            print(f"Merge not ready (HTTP {e.code}); retrying...")
-            time.sleep(3)
-            continue
-        raise SystemExit(
-            f"GitHub merge failed: HTTP {e.code}: {detail}"
-        )
-else:
-    raise SystemExit("Could not merge the pull request.")
+print("Pull request merged successfully.")
 PY
                     '''
                 }
@@ -458,10 +434,10 @@ PY
                     git fetch origin main
                     git checkout -B main origin/main
 
-                    echo "Verified environment configuration:"
+                    echo "Environment configuration:"
                     git show "origin/main:environment/$ENVIRONMENT.json"
 
-                    echo "Verified node configuration:"
+                    echo "Node configuration:"
                     git show "origin/main:node/$NODE.json"
                 '''
             }
@@ -577,17 +553,14 @@ PY
     post {
         success {
             echo 'Pipeline completed successfully.'
-            echo 'JSON updated, SonarQube analyzed, PR merged, artifact archived and Nexus upload completed.'
         }
 
         failure {
-            echo 'Pipeline failed. Check the Console Output for the first failing stage.'
+            echo 'Pipeline failed. Check the first error in Console Output.'
         }
 
         always {
-            sh '''
-                rm -f nexus-settings.xml
-            '''
+            sh 'rm -f nexus-settings.xml'
         }
     }
 }
