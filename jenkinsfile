@@ -22,13 +22,10 @@ pipeline {
 
     environment {
         GITHUB_API = 'https://api.github.com/repos/chvkarthik-87/jenkins-config-automation'
-        GITHUB_REPO = 'https://github.com/chvkarthik-87/jenkins-config-automation.git'
-
         NEXUS_URL = 'http://98.83.162.0:8081'
         NEXUS_REPOSITORY = 'maven-releases'
         GROUP_ID = 'com.chvkarthik.config'
         ARTIFACT_ID = 'jenkins-config-automation'
-
         NO_CHANGES = 'false'
     }
 
@@ -70,7 +67,7 @@ pipeline {
                     ).trim()
 
                     env.OLD_APPNAME = envJson.appName.toString()
-                    env.OLD_VERSION = envJson.version.toString()
+                    env.OLD_VERSION = envJson.version.toString().trim()
                     env.OLD_REPLICAS = envJson.replicas.toString()
                     env.OLD_LOGLEVEL = envJson.logLevel.toString()
 
@@ -79,6 +76,7 @@ pipeline {
                     env.OLD_NODE_REGION = nodeJson.region.toString()
                     env.OLD_NODE_AZ = nodeJson.availabilityZone.toString()
 
+                    // Blank text parameters use the current JSON values.
                     env.NEW_APPNAME = params.ENV_APPNAME?.trim() ?
                         params.ENV_APPNAME.trim() : env.OLD_APPNAME
 
@@ -87,10 +85,6 @@ pipeline {
 
                     env.NEW_REPLICAS = params.ENV_REPLICAS?.trim() ?
                         params.ENV_REPLICAS.trim() : env.OLD_REPLICAS
-
-                    // Choice parameters always have a selected value.
-                    env.NEW_LOGLEVEL = params.ENV_LOGLEVEL.toString().trim()
-                    env.NEW_NODE_TYPE = params.NODE_TYPE.toString().trim()
 
                     env.NEW_NODE_NAME = params.NODE_NAME?.trim() ?
                         params.NODE_NAME.trim() : env.OLD_NODE_NAME
@@ -101,11 +95,21 @@ pipeline {
                     env.NEW_NODE_AZ = params.NODE_AZ?.trim() ?
                         params.NODE_AZ.trim() : env.OLD_NODE_AZ
 
-                    if (!(env.NEW_VERSION ==~ /\\d+\\.\\d+\\.\\d+/)) {
-                        error('Version must use X.Y.Z format, for example 2.1.0')
+                    // Choice parameters always have a selected value.
+                    env.NEW_LOGLEVEL = params.ENV_LOGLEVEL.toString().trim()
+                    env.NEW_NODE_TYPE = params.NODE_TYPE.toString().trim()
+
+                    // Final version fallback and validation.
+                    env.NEW_VERSION = (env.NEW_VERSION ?: '').trim()
+                    if (!env.NEW_VERSION) {
+                        env.NEW_VERSION = env.OLD_VERSION
                     }
 
-                    if (!(env.NEW_REPLICAS ==~ /\\d+/) ||
+                    if (!(env.NEW_VERSION ==~ /^\d+\.\d+\.\d+$/)) {
+                        error("Invalid version '${env.NEW_VERSION}'. Current version is '${env.OLD_VERSION}'. Use X.Y.Z format, e.g. 2.1.0.")
+                    }
+
+                    if (!(env.NEW_REPLICAS ==~ /^\d+$/) ||
                         env.NEW_REPLICAS.toInteger() < 1) {
                         error('Replicas must be a whole number greater than zero')
                     }
@@ -164,7 +168,6 @@ pipeline {
                 ]) {
                     sh '''
                         set -eu
-
                         python3 - <<'PY'
 import json, os
 
@@ -263,7 +266,7 @@ PY
 
                     if (diffStatus == 0) {
                         env.NO_CHANGES = 'true'
-                        echo 'No configuration changes. Keeping current configuration; remaining release stages will be skipped.'
+                        echo 'No configuration changes detected. Existing configuration will remain unchanged.'
                     } else if (diffStatus == 1) {
                         sh "git commit -m 'Update ${env.SELECTED_ENV}/${env.SELECTED_NODE} to ${env.NEW_VERSION}'"
                     } else {
@@ -457,18 +460,20 @@ PY
         success {
             script {
                 if (env.NO_CHANGES == 'true') {
-                    echo 'SUCCESS: No changes requested. Existing configuration remains unchanged.'
+                    echo 'SUCCESS: No configuration changes. Existing GitHub configuration remains unchanged.'
                 } else {
                     echo "SUCCESS: ${env.OLD_VERSION} -> ${env.NEW_VERSION}"
                     echo "Environment: ${env.SELECTED_ENV}"
                     echo "Node: ${env.SELECTED_NODE}"
-                    echo 'Configuration merged and artifact upload completed.'
+                    echo 'Configuration merged and artifact uploaded.'
                 }
             }
         }
+
         failure {
-            echo 'Pipeline failed. Check the first error in Console Output.'
+            echo 'Pipeline failed. Check the first ERROR in Console Output.'
         }
+
         always {
             echo "Build result: ${currentBuild.currentResult}"
         }
