@@ -5,15 +5,15 @@ pipeline {
         choice(name: 'ENVIRONMENT', choices: ['dev', 'stage', 'uat', 'prod'], description: 'Select environment')
         choice(name: 'NODE', choices: ['dev', 'stage', 'uat', 'prod'], description: 'Select node configuration')
 
-        string(name: 'ENV_APPNAME', defaultValue: 'myapp', description: 'Enter new application name')
-        string(name: 'ENV_VERSION', defaultValue: '2.0.0', description: 'Enter new version')
-        string(name: 'ENV_REPLICAS', defaultValue: '1', description: 'Enter number of replicas')
-        choice(name: 'ENV_LOGLEVEL', choices: ['INFO', 'DEBUG', 'WARN', 'ERROR'], description: 'Select application log level')
+        string(name: 'ENV_APPNAME', defaultValue: '', description: 'New app name; blank = current value')
+        string(name: 'ENV_VERSION', defaultValue: '', description: 'New version; blank = current version')
+        string(name: 'ENV_REPLICAS', defaultValue: '', description: 'New replicas; blank = current value')
+        choice(name: 'ENV_LOGLEVEL', choices: ['INFO', 'DEBUG', 'WARN', 'ERROR'], description: 'Application log level')
 
-        string(name: 'NODE_NAME', defaultValue: 'node-01', description: 'Enter new node name')
-        choice(name: 'NODE_TYPE', choices: ['worker', 'master'], description: 'Select node type')
-        string(name: 'NODE_REGION', defaultValue: 'us-east-1', description: 'Enter AWS region')
-        string(name: 'NODE_AZ', defaultValue: 'us-east-1a', description: 'Enter availability zone')
+        string(name: 'NODE_NAME', defaultValue: '', description: 'New node name; blank = current value')
+        choice(name: 'NODE_TYPE', choices: ['worker', 'master'], description: 'Node type')
+        string(name: 'NODE_REGION', defaultValue: '', description: 'New region; blank = current value')
+        string(name: 'NODE_AZ', defaultValue: '', description: 'New availability zone; blank = current value')
     }
 
     tools {
@@ -22,10 +22,14 @@ pipeline {
 
     environment {
         GITHUB_API = 'https://api.github.com/repos/chvkarthik-87/jenkins-config-automation'
+        GITHUB_REPO = 'https://github.com/chvkarthik-87/jenkins-config-automation.git'
+
         NEXUS_URL = 'http://98.83.162.0:8081'
         NEXUS_REPOSITORY = 'maven-releases'
         GROUP_ID = 'com.chvkarthik.config'
         ARTIFACT_ID = 'jenkins-config-automation'
+
+        NO_CHANGES = 'false'
     }
 
     stages {
@@ -49,82 +53,68 @@ pipeline {
                     env.SELECTED_NODE = params.NODE.toString().trim()
 
                     if (!(env.SELECTED_ENV in ['dev', 'stage', 'uat', 'prod'])) {
-                        error('Invalid environment selected.')
+                        error('Invalid environment selected')
                     }
-
                     if (!(env.SELECTED_NODE in ['dev', 'stage', 'uat', 'prod'])) {
-                        error('Invalid node selected.')
+                        error('Invalid node selected')
                     }
 
-                    env.OLD_VERSION = sh(
-                        script: """
-                            set -eu
-                            git show origin/main:environment/${env.SELECTED_ENV}.json |
-                            python3 -c "import json,sys; print(json.load(sys.stdin)['version'])"
-                        """,
+                    def envJson = readJSON text: sh(
+                        script: "git show origin/main:environment/${env.SELECTED_ENV}.json",
                         returnStdout: true
                     ).trim()
 
-                    env.OLD_APPNAME = sh(
-                        script: """
-                            git show origin/main:environment/${env.SELECTED_ENV}.json |
-                            python3 -c "import json,sys; print(json.load(sys.stdin)['appName'])"
-                        """,
+                    def nodeJson = readJSON text: sh(
+                        script: "git show origin/main:node/${env.SELECTED_NODE}.json",
                         returnStdout: true
                     ).trim()
 
-                    env.OLD_REPLICAS = sh(
-                        script: """
-                            git show origin/main:environment/${env.SELECTED_ENV}.json |
-                            python3 -c "import json,sys; print(json.load(sys.stdin)['replicas'])"
-                        """,
-                        returnStdout: true
-                    ).trim()
+                    env.OLD_APPNAME = envJson.appName.toString()
+                    env.OLD_VERSION = envJson.version.toString()
+                    env.OLD_REPLICAS = envJson.replicas.toString()
+                    env.OLD_LOGLEVEL = envJson.logLevel.toString()
 
-                    env.OLD_LOGLEVEL = sh(
-                        script: """
-                            git show origin/main:environment/${env.SELECTED_ENV}.json |
-                            python3 -c "import json,sys; print(json.load(sys.stdin)['logLevel'])"
-                        """,
-                        returnStdout: true
-                    ).trim()
+                    env.OLD_NODE_NAME = nodeJson.name.toString()
+                    env.OLD_NODE_TYPE = nodeJson.type.toString()
+                    env.OLD_NODE_REGION = nodeJson.region.toString()
+                    env.OLD_NODE_AZ = nodeJson.availabilityZone.toString()
 
-                    env.OLD_NODE_NAME = sh(
-                        script: """
-                            git show origin/main:node/${env.SELECTED_NODE}.json |
-                            python3 -c "import json,sys; print(json.load(sys.stdin)['name'])"
-                        """,
-                        returnStdout: true
-                    ).trim()
+                    env.NEW_APPNAME = params.ENV_APPNAME?.trim() ?
+                        params.ENV_APPNAME.trim() : env.OLD_APPNAME
 
-                    env.OLD_NODE_TYPE = sh(
-                        script: """
-                            git show origin/main:node/${env.SELECTED_NODE}.json |
-                            python3 -c "import json,sys; print(json.load(sys.stdin)['type'])"
-                        """,
-                        returnStdout: true
-                    ).trim()
+                    env.NEW_VERSION = params.ENV_VERSION?.trim() ?
+                        params.ENV_VERSION.trim() : env.OLD_VERSION
 
-                    env.OLD_NODE_REGION = sh(
-                        script: """
-                            git show origin/main:node/${env.SELECTED_NODE}.json |
-                            python3 -c "import json,sys; print(json.load(sys.stdin)['region'])"
-                        """,
-                        returnStdout: true
-                    ).trim()
+                    env.NEW_REPLICAS = params.ENV_REPLICAS?.trim() ?
+                        params.ENV_REPLICAS.trim() : env.OLD_REPLICAS
 
-                    env.OLD_NODE_AZ = sh(
-                        script: """
-                            git show origin/main:node/${env.SELECTED_NODE}.json |
-                            python3 -c "import json,sys; print(json.load(sys.stdin)['availabilityZone'])"
-                        """,
-                        returnStdout: true
-                    ).trim()
+                    // Choice parameters always have a selected value.
+                    env.NEW_LOGLEVEL = params.ENV_LOGLEVEL.toString().trim()
+                    env.NEW_NODE_TYPE = params.NODE_TYPE.toString().trim()
 
-                    env.NEW_VERSION = params.ENV_VERSION.toString().trim()
+                    env.NEW_NODE_NAME = params.NODE_NAME?.trim() ?
+                        params.NODE_NAME.trim() : env.OLD_NODE_NAME
 
-                    if (!env.NEW_VERSION) {
-                        error('Enter a new version.')
+                    env.NEW_NODE_REGION = params.NODE_REGION?.trim() ?
+                        params.NODE_REGION.trim() : env.OLD_NODE_REGION
+
+                    env.NEW_NODE_AZ = params.NODE_AZ?.trim() ?
+                        params.NODE_AZ.trim() : env.OLD_NODE_AZ
+
+                    if (!(env.NEW_VERSION ==~ /\\d+\\.\\d+\\.\\d+/)) {
+                        error('Version must use X.Y.Z format, for example 2.1.0')
+                    }
+
+                    if (!(env.NEW_REPLICAS ==~ /\\d+/) ||
+                        env.NEW_REPLICAS.toInteger() < 1) {
+                        error('Replicas must be a whole number greater than zero')
+                    }
+
+                    if (!(env.NEW_LOGLEVEL in ['INFO', 'DEBUG', 'WARN', 'ERROR'])) {
+                        error('Invalid log level')
+                    }
+                    if (!(env.NEW_NODE_TYPE in ['worker', 'master'])) {
+                        error('Invalid node type')
                     }
 
                     echo '========== CURRENT CONFIGURATION =========='
@@ -136,19 +126,16 @@ pipeline {
                     echo "Node type: ${env.OLD_NODE_TYPE}"
                     echo "Region: ${env.OLD_NODE_REGION}"
                     echo "Availability zone: ${env.OLD_NODE_AZ}"
-                    echo '========== NEW CONFIGURATION =========='
-                    echo "Application: ${params.ENV_APPNAME}"
-                    echo "Version: ${env.NEW_VERSION}"
-                    echo "Replicas: ${params.ENV_REPLICAS}"
-                    echo "Log level: ${params.ENV_LOGLEVEL}"
-                    echo "Node name: ${params.NODE_NAME}"
-                    echo "Node type: ${params.NODE_TYPE}"
-                    echo "Region: ${params.NODE_REGION}"
-                    echo "Availability zone: ${params.NODE_AZ}"
 
-                    if (env.NEW_VERSION == env.OLD_VERSION) {
-                        error('New version must differ from current version.')
-                    }
+                    echo '========== CONFIGURATION TO APPLY =========='
+                    echo "Application: ${env.NEW_APPNAME}"
+                    echo "Version: ${env.NEW_VERSION}"
+                    echo "Replicas: ${env.NEW_REPLICAS}"
+                    echo "Log level: ${env.NEW_LOGLEVEL}"
+                    echo "Node name: ${env.NEW_NODE_NAME}"
+                    echo "Node type: ${env.NEW_NODE_TYPE}"
+                    echo "Region: ${env.NEW_NODE_REGION}"
+                    echo "Availability zone: ${env.NEW_NODE_AZ}"
                 }
             }
         }
@@ -156,7 +143,8 @@ pipeline {
         stage('Prepare Feature Branch') {
             steps {
                 script {
-                    env.FEATURE_BRANCH = "feature/config-${env.SELECTED_ENV}-${env.SELECTED_NODE}-${env.BUILD_NUMBER}"
+                    env.FEATURE_BRANCH =
+                        "feature/config-${env.SELECTED_ENV}-${env.SELECTED_NODE}-${env.BUILD_NUMBER}"
                 }
                 sh 'git checkout -B "$FEATURE_BRANCH" origin/main'
             }
@@ -165,35 +153,33 @@ pipeline {
         stage('Update JSON Files') {
             steps {
                 withEnv([
-                    "APP_NAME=${params.ENV_APPNAME}",
-                    "APP_VERSION=${params.ENV_VERSION}",
-                    "APP_REPLICAS=${params.ENV_REPLICAS}",
-                    "APP_LOGLEVEL=${params.ENV_LOGLEVEL}",
-                    "CONFIG_NODE_NAME=${params.NODE_NAME}",
-                    "CONFIG_NODE_TYPE=${params.NODE_TYPE}",
-                    "CONFIG_NODE_REGION=${params.NODE_REGION}",
-                    "CONFIG_NODE_AZ=${params.NODE_AZ}"
+                    "APP_NAME=${env.NEW_APPNAME}",
+                    "APP_VERSION=${env.NEW_VERSION}",
+                    "APP_REPLICAS=${env.NEW_REPLICAS}",
+                    "APP_LOGLEVEL=${env.NEW_LOGLEVEL}",
+                    "CONFIG_NODE_NAME=${env.NEW_NODE_NAME}",
+                    "CONFIG_NODE_TYPE=${env.NEW_NODE_TYPE}",
+                    "CONFIG_NODE_REGION=${env.NEW_NODE_REGION}",
+                    "CONFIG_NODE_AZ=${env.NEW_NODE_AZ}"
                 ]) {
                     sh '''
                         set -eu
+
                         python3 - <<'PY'
 import json, os
 
 env_name = os.environ["SELECTED_ENV"]
 node_name = os.environ["SELECTED_NODE"]
+
 env_file = f"environment/{env_name}.json"
 node_file = f"node/{node_name}.json"
-
-replicas = int(os.environ["APP_REPLICAS"])
-if replicas < 1:
-    raise ValueError("Replicas must be at least 1")
 
 with open(env_file, encoding="utf-8") as f:
     env_data = json.load(f)
 
 env_data["appName"] = os.environ["APP_NAME"]
 env_data["version"] = os.environ["APP_VERSION"]
-env_data["replicas"] = replicas
+env_data["replicas"] = int(os.environ["APP_REPLICAS"])
 env_data["logLevel"] = os.environ["APP_LOGLEVEL"]
 
 with open(env_file, "w", encoding="utf-8") as f:
@@ -227,7 +213,7 @@ PY
                     withSonarQubeEnv('SonarQube-Server') {
                         sh """
                             set -eu
-                            "${scannerHome}/bin/sonar-scanner" \
+                            "\${scannerHome}/bin/sonar-scanner" \
                               -Dsonar.projectKey=jenkins-config-automation \
                               -Dsonar.projectName=jenkins-config-automation \
                               -Dsonar.sources=environment,node \
@@ -263,20 +249,34 @@ PY
 
         stage('Commit Changes') {
             steps {
-                sh '''
-                    set -eu
-                    git add "environment/${SELECTED_ENV}.json"
-                    git add "node/${SELECTED_NODE}.json"
-                    if git diff --cached --quiet; then
-                        echo "No configuration changes detected."
-                        exit 1
-                    fi
-                    git commit -m "Update ${SELECTED_ENV}/${SELECTED_NODE} to ${NEW_VERSION}"
-                '''
+                script {
+                    sh '''
+                        set -eu
+                        git add "environment/${SELECTED_ENV}.json"
+                        git add "node/${SELECTED_NODE}.json"
+                    '''
+
+                    int diffStatus = sh(
+                        script: 'git diff --cached --quiet',
+                        returnStatus: true
+                    )
+
+                    if (diffStatus == 0) {
+                        env.NO_CHANGES = 'true'
+                        echo 'No configuration changes. Keeping current configuration; remaining release stages will be skipped.'
+                    } else if (diffStatus == 1) {
+                        sh "git commit -m 'Update ${env.SELECTED_ENV}/${env.SELECTED_NODE} to ${env.NEW_VERSION}'"
+                    } else {
+                        error('Unable to check staged changes')
+                    }
+                }
             }
         }
 
         stage('Push Feature Branch') {
+            when {
+                expression { env.NO_CHANGES != 'true' }
+            }
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'github-jenkins-token',
@@ -293,6 +293,9 @@ PY
         }
 
         stage('Create or Get Pull Request') {
+            when {
+                expression { env.NO_CHANGES != 'true' }
+            }
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'github-jenkins-token',
@@ -323,12 +326,14 @@ PY
                                     set -eu
                                     python3 - <<'PY'
 import json, os
+
 payload = {
     "title": os.environ["PR_TITLE"],
     "head": os.environ["PR_BRANCH"],
     "base": "main",
     "body": "Automated configuration update from Jenkins build " + os.environ["PR_BUILD"]
 }
+
 with open("pr-payload.json", "w", encoding="utf-8") as f:
     json.dump(payload, f)
 PY
@@ -350,6 +355,7 @@ PY
                                 ).trim()
                             }
                         }
+
                         echo "Pull request number: ${env.PR_NUMBER}"
                     }
                 }
@@ -357,6 +363,9 @@ PY
         }
 
         stage('Merge Pull Request Automatically') {
+            when {
+                expression { env.NO_CHANGES != 'true' }
+            }
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'github-jenkins-token',
@@ -378,6 +387,9 @@ PY
         }
 
         stage('Verify Main Branch') {
+            when {
+                expression { env.NO_CHANGES != 'true' }
+            }
             steps {
                 sh '''
                     set -eu
@@ -389,13 +401,22 @@ PY
         }
 
         stage('Create ZIP Artifact') {
+            when {
+                expression { env.NO_CHANGES != 'true' }
+            }
             steps {
                 sh '''
                     set -eu
+                    git fetch origin main
                     rm -rf artifact config-artifact.zip
                     mkdir -p artifact/environment artifact/node
-                    git show "origin/main:environment/${SELECTED_ENV}.json" > "artifact/environment/${SELECTED_ENV}.json"
-                    git show "origin/main:node/${SELECTED_NODE}.json" > "artifact/node/${SELECTED_NODE}.json"
+
+                    git show "origin/main:environment/${SELECTED_ENV}.json" \
+                      > "artifact/environment/${SELECTED_ENV}.json"
+
+                    git show "origin/main:node/${SELECTED_NODE}.json" \
+                      > "artifact/node/${SELECTED_NODE}.json"
+
                     cd artifact
                     zip -r ../config-artifact.zip .
                 '''
@@ -404,6 +425,9 @@ PY
         }
 
         stage('Upload Artifact to Nexus') {
+            when {
+                expression { env.NO_CHANGES != 'true' }
+            }
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'nexus-admin-new',
@@ -431,10 +455,16 @@ PY
 
     post {
         success {
-            echo "SUCCESS: ${env.OLD_VERSION} -> ${env.NEW_VERSION}"
-            echo "Environment: ${env.SELECTED_ENV}"
-            echo "Node: ${env.SELECTED_NODE}"
-            echo 'Configuration merged and artifact uploaded.'
+            script {
+                if (env.NO_CHANGES == 'true') {
+                    echo 'SUCCESS: No changes requested. Existing configuration remains unchanged.'
+                } else {
+                    echo "SUCCESS: ${env.OLD_VERSION} -> ${env.NEW_VERSION}"
+                    echo "Environment: ${env.SELECTED_ENV}"
+                    echo "Node: ${env.SELECTED_NODE}"
+                    echo 'Configuration merged and artifact upload completed.'
+                }
+            }
         }
         failure {
             echo 'Pipeline failed. Check the first error in Console Output.'
