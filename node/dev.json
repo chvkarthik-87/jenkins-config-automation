@@ -1,24 +1,24 @@
 {
+  "environment": "dev",
+  "nodeName": "node-01",
+  "nodeType": "worker",
+  "region": "us-east-1",
+  "availabilityZone": "us-east-1a",
+  "instanceType": "t3.micro",
+  "os": "Amazon Linux 2023",
+  "kubernetes": {
+    "role": "worker",
+    "version": "1.36"
+  },
+  "resources": {
+    "cpu": "2",
+    "memory": "1Gi",
+    "disk": "20Gi"
+  },
+  "labels": {
     "environment": "dev",
-    "nodeName": "node-01",
-    "nodeType": "worker",
-    "region": "us-east-1a",
-    "availabilityZone": "us-east-1b",
-    "instanceType": "t3.micro",
-    "os": "Amazon Linux 2023",
-    "kubernetes": {
-        "role": "worker",
-        "version": "1.36"
-    },
-    "resources": {
-        "cpu": "2",
-        "memory": "1Gi",
-        "disk": "20Gi"
-    },
-    "labels": {
-        "environment": "dev",
-        "team": "development"
-    },
-    "name": "node-01",
-    "type": "worker"
+    "team": "development"
+  },
+  "name": "node-01",
+  "type": "worker"
 }
