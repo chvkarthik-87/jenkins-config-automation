@@ -7,8 +7,8 @@ pipeline {
     }
 
     parameters {
-        choice(name: 'ENVIRONMENT', choices: ['dev', 'stage', 'uat', 'prod'], description: 'Select environment')
-        choice(name: 'NODE', choices: ['dev', 'stage', 'uat', 'prod'], description: 'Select node')
+        choice(name: 'ENVIRONMENT', choices: ['dev', 'stage', 'uat', 'prod'], description: 'Environment to update')
+        choice(name: 'NODE', choices: ['dev', 'stage', 'uat', 'prod'], description: 'Node configuration to update')
 
         string(name: 'ENV_APPNAME', defaultValue: 'myapp', description: 'Application name')
         string(name: 'ENV_VERSION', defaultValue: '2.0.0', description: 'Application version')
@@ -17,12 +17,11 @@ pipeline {
 
         string(name: 'NODE_NAME', defaultValue: 'node-01', description: 'Node name')
         string(name: 'NODE_TYPE', defaultValue: 'worker', description: 'Node type')
-        string(name: 'NODE_REGION', defaultValue: 'us-east-1', description: 'AWS region')
+        string(name: 'NODE_REGION', defaultValue: 'us-east-1', description: 'Node region')
         string(name: 'NODE_AZ', defaultValue: 'us-east-1a', description: 'Availability zone')
     }
 
     environment {
-        REPO_URL = 'https://github.com/chvkarthik-87/jenkins-config-automation.git'
         GITHUB_API = 'https://api.github.com/repos/chvkarthik-87/jenkins-config-automation'
         FEATURE_BRANCH = 'feature/config-update'
         SONAR_PROJECT_KEY = 'jenkins-config-automation'
@@ -37,8 +36,9 @@ pipeline {
 
                 sh '''
                     set -eu
-                    git branch --show-current
-                    git status --short
+                    echo "Checked out repository:"
+                    git remote -v
+                    git log -1 --oneline
                 '''
             }
         }
@@ -61,6 +61,9 @@ pipeline {
                             fetch origin main "$FEATURE_BRANCH"
 
                         git checkout -B "$FEATURE_BRANCH" "origin/$FEATURE_BRANCH"
+
+                        echo "Working branch:"
+                        git branch --show-current
                     '''
                 }
             }
@@ -73,17 +76,17 @@ pipeline {
 
                     case "$ENVIRONMENT" in
                         dev|stage|uat|prod) ;;
-                        *) echo "Invalid environment"; exit 1 ;;
+                        *) echo "Invalid ENVIRONMENT"; exit 1 ;;
                     esac
 
                     case "$NODE" in
                         dev|stage|uat|prod) ;;
-                        *) echo "Invalid node"; exit 1 ;;
+                        *) echo "Invalid NODE"; exit 1 ;;
                     esac
 
                     case "$ENV_REPLICAS" in
                         ''|*[!0-9]*)
-                            echo "ENV_REPLICAS must be a number"
+                            echo "ENV_REPLICAS must be a positive integer"
                             exit 1
                             ;;
                     esac
@@ -131,17 +134,17 @@ def update_json(path, updates):
     if not path.is_file():
         raise SystemExit(f"Required file not found: {path}")
 
-    with path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
+    with path.open("r", encoding="utf-8") as file:
+        data = json.load(file)
 
     if not isinstance(data, dict):
         raise SystemExit(f"Expected a JSON object in {path}")
 
     data.update(updates)
 
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-        f.write("\\n")
+    with path.open("w", encoding="utf-8") as file:
+        json.dump(data, file, indent=2)
+        file.write("\\n")
 
 update_json(env_file, {
     "appName": os.environ["APP_NAME"],
@@ -151,8 +154,8 @@ update_json(env_file, {
 })
 
 update_json(node_file, {
-    "name": os.environ["CONFIG_NODE_NAME"],
-    "type": os.environ["CONFIG_NODE_TYPE"],
+    "nodeName": os.environ["CONFIG_NODE_NAME"],
+    "nodeType": os.environ["CONFIG_NODE_TYPE"],
     "region": os.environ["CONFIG_NODE_REGION"],
     "availabilityZone": os.environ["CONFIG_NODE_AZ"]
 })
@@ -161,6 +164,7 @@ print(f"Updated {env_file}")
 print(f"Updated {node_file}")
 PY
 
+                        echo "Selected configuration changes:"
                         git diff -- "environment/$SELECTED_ENV.json" "node/$SELECTED_NODE.json"
                     '''
                 }
@@ -201,13 +205,13 @@ PY
                             '''
                         }
                     } else {
-                        echo 'No pom.xml found. Skipping Maven compilation for this configuration-only repository.'
+                        echo 'No pom.xml found. Skipping Maven because this repository contains configuration JSON files.'
                     }
                 }
             }
         }
 
-        stage('Validate JSON and Prepare Commit') {
+        stage('Validate JSON and Commit') {
             steps {
                 sh '''
                     set -eu
@@ -217,19 +221,21 @@ import json
 import os
 from pathlib import Path
 
-for path in (
+files = [
     Path("environment") / (os.environ["ENVIRONMENT"] + ".json"),
     Path("node") / (os.environ["NODE"] + ".json")
-):
-    with path.open("r", encoding="utf-8") as f:
-        json.load(f)
+]
+
+for path in files:
+    with path.open("r", encoding="utf-8") as file:
+        json.load(file)
     print(f"Valid JSON: {path}")
 PY
 
                     git add "environment/$ENVIRONMENT.json" "node/$NODE.json"
 
                     if git diff --cached --quiet; then
-                        echo "No configuration changes to commit."
+                        echo "No changes to commit."
                     else
                         git config user.name "Jenkins Automation"
                         git config user.email "jenkins-automation@users.noreply.github.com"
@@ -255,6 +261,8 @@ PY
 
                         git -c http.extraheader="AUTHORIZATION: basic $AUTH_HEADER" \
                             push origin "HEAD:refs/heads/$FEATURE_BRANCH"
+
+                        echo "Feature branch pushed successfully."
                     '''
                 }
             }
@@ -281,21 +289,21 @@ PY
                         python3 - <<'PY'
 import json
 
-with open("open_prs.json", encoding="utf-8") as f:
-    prs = json.load(f)
+with open("open_prs.json", encoding="utf-8") as file:
+    prs = json.load(file)
 
 if prs:
     pr = prs[0]
-    with open("pr_number.txt", "w", encoding="utf-8") as f:
-        f.write(str(pr["number"]))
+    with open("pr_number.txt", "w", encoding="utf-8") as file:
+        file.write(str(pr["number"]))
     print(f"Reusing existing PR #{pr['number']}")
 else:
-    print("No open PR found. A new PR will be created.")
+    with open("pr_number.txt", "w", encoding="utf-8") as file:
+        file.write("NEW")
+    print("No open PR found.")
 PY
 
-                        if [ -s pr_number.txt ]; then
-                            echo "Using existing pull request #$(cat pr_number.txt)"
-                        else
+                        if [ "$(cat pr_number.txt)" = "NEW" ]; then
                             curl -fsS \
                               -H "Authorization: Bearer $GITHUB_TOKEN" \
                               -H "Accept: application/vnd.github+json" \
@@ -308,14 +316,14 @@ PY
                             python3 - <<'PY'
 import json
 
-with open("pr_response.json", encoding="utf-8") as f:
-    pr = json.load(f)
+with open("pr_response.json", encoding="utf-8") as file:
+    pr = json.load(file)
 
 if "number" not in pr:
-    raise SystemExit(f"GitHub did not return a PR number: {pr}")
+    raise SystemExit(f"Could not create pull request: {pr}")
 
-with open("pr_number.txt", "w", encoding="utf-8") as f:
-    f.write(str(pr["number"]))
+with open("pr_number.txt", "w", encoding="utf-8") as file:
+    file.write(str(pr["number"]))
 
 print(f"Created PR #{pr['number']}")
 PY
@@ -340,10 +348,11 @@ PY
                         set -eu
 
                         PR_NUMBER=$(cat pr_number.txt)
-
                         attempt=1
+                        MERGEABLE="none"
+
                         while [ "$attempt" -le 12 ]; do
-                            echo "Checking mergeability: attempt $attempt"
+                            echo "Checking PR #$PR_NUMBER: attempt $attempt"
 
                             curl -fsS \
                               -H "Authorization: Bearer $GITHUB_TOKEN" \
@@ -351,29 +360,49 @@ PY
                               "$GITHUB_API/pulls/$PR_NUMBER" \
                               -o pr_details.json
 
-                            MERGEABLE=$(python3 -c 'import json; d=json.load(open("pr_details.json")); print(d.get("mergeable"))')
+                            MERGEABLE=$(python3 -c 'import json; d=json.load(open("pr_details.json")); v=d.get("mergeable"); print("none" if v is None else str(v).lower())')
                             PR_STATE=$(python3 -c 'import json; d=json.load(open("pr_details.json")); print(d.get("state", ""))')
-                            IS_MERGED=$(python3 -c 'import json; d=json.load(open("pr_details.json")); print(d.get("merged", False))')
+                            IS_MERGED=$(python3 -c 'import json; d=json.load(open("pr_details.json")); print(str(d.get("merged", False)).lower())')
 
-                            if [ "$IS_MERGED" = "True" ] || [ "$IS_MERGED" = "true" ]; then
+                            echo "State: $PR_STATE"
+                            echo "Mergeable: $MERGEABLE"
+                            echo "Merged: $IS_MERGED"
+
+                            if [ "$IS_MERGED" = "true" ]; then
                                 echo "PR #$PR_NUMBER is already merged."
                                 exit 0
                             fi
 
                             if [ "$PR_STATE" != "open" ]; then
-                                echo "PR #$PR_NUMBER is not open. State: $PR_STATE"
+                                echo "ERROR: PR is not open."
+                                cat pr_details.json
                                 exit 1
                             fi
 
-                            if [ "$MERGEABLE" != "null" ]; then
+                            if [ "$MERGEABLE" = "true" ] || [ "$MERGEABLE" = "false" ]; then
                                 break
                             fi
 
+                            echo "GitHub is still calculating mergeability. Waiting 5 seconds..."
                             sleep 5
                             attempt=$((attempt + 1))
                         done
 
-                        curl -sS \
+                        if [ "$MERGEABLE" = "none" ]; then
+                            echo "ERROR: GitHub could not determine mergeability after retries."
+                            cat pr_details.json
+                            exit 1
+                        fi
+
+                        if [ "$MERGEABLE" != "true" ]; then
+                            echo "ERROR: PR has conflicts or is not mergeable."
+                            cat pr_details.json
+                            exit 1
+                        fi
+
+                        echo "PR is mergeable. Requesting squash merge..."
+
+                        HTTP_STATUS=$(curl -sS \
                           -o merge_response.json \
                           -w '%{http_code}' \
                           -H "Authorization: Bearer $GITHUB_TOKEN" \
@@ -381,13 +410,12 @@ PY
                           -H "Content-Type: application/json" \
                           -X PUT \
                           "$GITHUB_API/pulls/$PR_NUMBER/merge" \
-                          -d '{"merge_method":"squash"}' \
-                          > merge_http_status.txt
+                          -d '{"merge_method":"squash"}')
 
-                        HTTP_STATUS=$(cat merge_http_status.txt)
+                        echo "Merge API HTTP status: $HTTP_STATUS"
 
                         if [ "$HTTP_STATUS" != "200" ]; then
-                            echo "GitHub merge API returned HTTP $HTTP_STATUS"
+                            echo "ERROR: GitHub rejected the merge request."
                             cat merge_response.json
                             exit 1
                         fi
@@ -395,8 +423,8 @@ PY
                         python3 - <<'PY'
 import json
 
-with open("merge_response.json", encoding="utf-8") as f:
-    result = json.load(f)
+with open("merge_response.json", encoding="utf-8") as file:
+    result = json.load(file)
 
 if result.get("merged") is not True:
     raise SystemExit(f"GitHub did not confirm the merge: {result}")
@@ -447,7 +475,6 @@ PY
                         zip -r "$ARTIFACT" environment node
                     else
                         python3 - "$ARTIFACT" <<'PY'
-import os
 import sys
 import zipfile
 from pathlib import Path
@@ -498,7 +525,7 @@ PY
                           "$NEXUS_URL/service/rest/v1/components?repository=maven-releases")
 
                         if [ "$HTTP_STATUS" != "204" ]; then
-                            echo "Nexus upload failed with HTTP $HTTP_STATUS"
+                            echo "Nexus upload failed. HTTP status: $HTTP_STATUS"
                             cat nexus_response.txt
                             exit 1
                         fi
@@ -516,7 +543,7 @@ PY
         }
 
         failure {
-            echo 'Pipeline failed. Check the Console Output for the first failing stage.'
+            echo 'Pipeline failed. Check the first failing stage in Console Output.'
         }
 
         always {
