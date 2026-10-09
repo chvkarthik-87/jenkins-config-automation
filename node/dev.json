@@ -1,9 +1,9 @@
 {
   "environment": "dev",
-  "nodeName": "node-02",
+  "nodeName": "node-01",
   "nodeType": "worker",
-  "region": "us-west-1",
-  "availabilityZone": "us-west02",
+  "region": "us-east-1",
+  "availabilityZone": "us-east-1a",
   "instanceType": "t3.micro",
   "os": "Amazon Linux 2023",
   "kubernetes": {
@@ -19,6 +19,6 @@
     "environment": "dev",
     "team": "development"
   },
-  "name": "node-02",
+  "name": "node-01",
   "type": "worker"
 }
