@@ -6,195 +6,191 @@ pipeline {
         disableConcurrentBuilds()
     }
 
+    parameters {
+        string(
+            name: 'SOURCE_BRANCH',
+            defaultValue: 'feature/config-update',
+            description: 'Branch containing the changes to validate'
+        )
+    }
+
     environment {
         GITHUB_REPO = 'chvkarthik-87/jenkins-config-automation'
-        GITHUB_API = 'https://api.github.com'
-        FEATURE_BRANCH = 'feature/config-update'
         MAIN_BRANCH = 'main'
-
         NEXUS_URL = 'http://98.83.162.0:8081'
         NEXUS_REPOSITORY = 'deploy-artifacts'
     }
 
     stages {
+
         stage('Checkout Feature Branch') {
             steps {
-                dir('source') {
-                    deleteDir()
-                    git branch: 'feature/config-update',
-                        url: 'https://github.com/chvkarthik-87/jenkins-config-automation.git'
-                }
+                deleteDir()
+
+                git branch: "${params.SOURCE_BRANCH}",
+                    credentialsId: 'github-jenkins-token',
+                    url: 'https://github.com/chvkarthik-87/jenkins-config-automation.git'
 
                 sh '''
                     set -eu
-                    echo "Checked out feature branch."
-                    git -C source status --short
+                    git fetch origin main
+                    echo "Source branch: $(git branch --show-current)"
+                    echo "Latest commit: $(git rev-parse --short HEAD)"
                 '''
-            }
-        }
-
-        stage('Sync Main Branch') {
-            steps {
-                dir('source') {
-                    sh '''
-                        set -eu
-
-                        git config user.name "Jenkins Automation"
-                        git config user.email "jenkins-automation@users.noreply.github.com"
-
-                        git fetch origin main feature/config-update
-                        git checkout feature/config-update
-                        git reset --hard origin/feature/config-update
-
-                        if git merge --no-edit origin/main; then
-                            echo "Main branch sync successful."
-                        else
-                            CONFLICTS=$(git diff --name-only --diff-filter=U)
-
-                            if [ "$CONFLICTS" = "Jenkinsfile-bash-validation" ]; then
-                                git checkout --ours -- Jenkinsfile-bash-validation
-                                git add Jenkinsfile-bash-validation
-                                git commit --no-edit
-                            else
-                                echo "Unexpected merge conflict:"
-                                printf '%s\\n' "$CONFLICTS"
-                                git merge --abort || true
-                                exit 1
-                            fi
-                        fi
-                    '''
-                }
-
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'github-jenkins-token',
-                        usernameVariable: 'GH_USER',
-                        passwordVariable: 'GH_TOKEN'
-                    )
-                ]) {
-                    dir('source') {
-                        sh '''
-                            set -eu
-                            AUTH=$(printf '%s' "$GH_USER:$GH_TOKEN" |
-                                base64 | tr -d '\\n')
-
-                            git -c http.extraheader="AUTHORIZATION: basic $AUTH" \
-                                push origin HEAD:feature/config-update
-                        '''
-                    }
-                }
             }
         }
 
         stage('Identify Changed Files') {
             steps {
-                dir('source') {
-                    sh '''
-                        set -eu
+                sh '''
+                    set -eu
 
-                        git fetch origin main feature/config-update
+                    BASE=$(git merge-base origin/main HEAD)
 
-                        BASE=$(git merge-base origin/main HEAD)
+                    git diff \
+                        --name-only \
+                        --diff-filter=ACMR \
+                        "$BASE" HEAD > changed-files.txt
 
-                        git diff --name-only "$BASE" HEAD \
-                            > "$WORKSPACE/changed-files.txt"
+                    echo "Files changed compared with main:"
+                    cat changed-files.txt || true
 
-                        echo "Changed files:"
-                        cat "$WORKSPACE/changed-files.txt"
-                    '''
-                }
+                    if [ ! -s changed-files.txt ]; then
+                        echo "No changed files found."
+                        echo "Nothing to validate or merge."
+                        exit 1
+                    fi
+                '''
+
+                archiveArtifacts(
+                    artifacts: 'changed-files.txt',
+                    fingerprint: true
+                )
             }
         }
 
         stage('Validate Changed Files') {
             steps {
-                dir('source') {
-                    sh '''
-                        set -eu
+                sh '''
+                    set -eu
 
-                        if [ ! -s "$WORKSPACE/changed-files.txt" ]; then
-                            echo "No changed files to validate."
-                            exit 0
+                    FAILED=0
+                    CHECKED=0
+
+                    while IFS= read -r file || [ -n "$file" ]; do
+                        [ -n "$file" ] || continue
+
+                        # Deleted or unavailable files are not validated.
+                        if [ ! -f "$file" ]; then
+                            echo "SKIPPED (file not present): $file"
+                            continue
                         fi
 
-                        FAILED=0
-                        CHECKED=0
+                        CHECKED=$((CHECKED + 1))
+                        echo ""
+                        echo "===================================="
+                        echo "Checking: $file"
+                        echo "===================================="
 
-                        while IFS= read -r FILE; do
-                            [ -n "$FILE" ] || continue
+                        case "$file" in
 
-                            # Ignore deleted files
-                            [ -f "$FILE" ] || {
-                                echo "Skipping deleted/missing file: $FILE"
-                                continue
-                            }
+                            *.sh)
+                                if bash -n "$file"; then
+                                    echo "VALID: Bash syntax passed: $file"
+                                else
+                                    echo "INVALID: Bash syntax failed: $file"
+                                    FAILED=1
+                                fi
+                                ;;
 
-                            echo "Checking: $FILE"
-                            CHECKED=$((CHECKED + 1))
-
-                            case "$FILE" in
-                                *.sh)
-                                    if bash -n "$FILE"; then
-                                        echo "Bash syntax OK: $FILE"
+                            Jenkinsfile|Jenkinsfile-*)
+                                # Jenkins has already parsed the Jenkinsfile
+                                # used to start this pipeline.
+                                if [ "$file" = "Jenkinsfile-bash-validation" ]; then
+                                    echo "VALID: Jenkins loaded this pipeline file."
+                                elif command -v groovy >/dev/null 2>&1; then
+                                    if groovy -e '
+                                        new GroovyShell().parse(new File(args[0]))
+                                    ' "$file"; then
+                                        echo "VALID: Groovy syntax passed: $file"
                                     else
-                                        echo "Bash syntax FAILED: $FILE"
+                                        echo "INVALID: Groovy syntax failed: $file"
                                         FAILED=1
                                     fi
-                                    ;;
+                                else
+                                    echo "INVALID: Cannot validate $file."
+                                    echo "Install Groovy or configure a Jenkinsfile linter."
+                                    FAILED=1
+                                fi
+                                ;;
 
-                                Jenkinsfile|Jenkinsfile-*|jenkinsfile)
-                                    echo "Pipeline file detected: $FILE"
-                                    echo "Groovy syntax validation requires a configured Groovy/Jenkins validator."
-                                    ;;
-
-                                *.json)
-                                    if python3 -m json.tool "$FILE" >/dev/null; then
-                                        echo "JSON syntax OK: $FILE"
+                            *.groovy)
+                                if command -v groovy >/dev/null 2>&1; then
+                                    if groovy -e '
+                                        new GroovyShell().parse(new File(args[0]))
+                                    ' "$file"; then
+                                        echo "VALID: Groovy syntax passed: $file"
                                     else
-                                        echo "JSON syntax FAILED: $FILE"
+                                        echo "INVALID: Groovy syntax failed: $file"
                                         FAILED=1
                                     fi
-                                    ;;
+                                else
+                                    echo "INVALID: Groovy validator is not installed."
+                                    FAILED=1
+                                fi
+                                ;;
 
-                                *.yaml|*.yml)
-                                    if python3 -c 'import yaml' >/dev/null 2>&1; then
-                                        if python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$FILE"; then
-                                            echo "YAML syntax OK: $FILE"
-                                        else
-                                            echo "YAML syntax FAILED: $FILE"
-                                            FAILED=1
-                                        fi
-                                    else
-                                        echo "ERROR: PyYAML is not installed; cannot validate $FILE"
-                                        FAILED=1
-                                    fi
-                                    ;;
+                            *.json)
+                                if python3 -m json.tool "$file" >/dev/null; then
+                                    echo "VALID: JSON syntax passed: $file"
+                                else
+                                    echo "INVALID: JSON syntax failed: $file"
+                                    FAILED=1
+                                fi
+                                ;;
 
-                                *.xml)
-                                    if python3 -c 'import sys,xml.etree.ElementTree as E; E.parse(sys.argv[1])' "$FILE"; then
-                                        echo "XML syntax OK: $FILE"
-                                    else
-                                        echo "XML syntax FAILED: $FILE"
-                                        FAILED=1
-                                    fi
-                                    ;;
+                            *.yaml|*.yml)
+                                if python3 -c \
+                                    'import yaml,sys; yaml.safe_load(open(sys.argv[1]))' \
+                                    "$file"; then
+                                    echo "VALID: YAML syntax passed: $file"
+                                else
+                                    echo "INVALID: YAML syntax failed, or PyYAML is missing: $file"
+                                    echo "Install PyYAML on the Jenkins agent."
+                                    FAILED=1
+                                fi
+                                ;;
 
-                                *)
-                                    echo "No syntax validator configured for: $FILE"
-                                    ;;
-                            esac
-                        done < "$WORKSPACE/changed-files.txt"
+                            *.xml)
+                                if python3 -c \
+                                    'import xml.etree.ElementTree as E,sys; E.parse(sys.argv[1])' \
+                                    "$file"; then
+                                    echo "VALID: XML syntax passed: $file"
+                                else
+                                    echo "INVALID: XML syntax failed: $file"
+                                    FAILED=1
+                                fi
+                                ;;
 
-                        echo "Files inspected: $CHECKED"
+                            *)
+                                echo "INFO: No syntax validator configured for: $file"
+                                echo "File detected; type-specific validation was not performed."
+                                ;;
+                        esac
 
-                        if [ "$FAILED" -ne 0 ]; then
-                            echo "One or more validations failed."
-                            exit 1
-                        fi
+                    done < changed-files.txt
 
-                        echo "Changed-file validation completed."
-                    '''
-                }
+                    echo ""
+                    echo "Files inspected: $CHECKED"
+
+                    if [ "$FAILED" -ne 0 ]; then
+                        echo "INVALID FILES FOUND."
+                        echo "ERROR: Validation failed. PR merge is blocked."
+                        exit 1
+                    fi
+
+                    echo "All configured validations passed."
+                '''
             }
         }
 
@@ -203,21 +199,19 @@ pipeline {
                 sh '''
                     set -eu
 
-                    mkdir -p "$WORKSPACE/artifacts"
+                    mkdir -p artifacts
 
-                    tar -czf "$WORKSPACE/artifacts/changed-files-${BUILD_NUMBER}.tar.gz" \
-                        -C "$WORKSPACE" changed-files.txt
+                    # Package the changed files that still exist.
+                    tar -czf artifacts/changed-files.tar.gz \
+                        --files-from=changed-files.txt \
+                        --ignore-failed-read
 
-                    cd "$WORKSPACE/artifacts"
-
-                    sha256sum "changed-files-${BUILD_NUMBER}.tar.gz" \
-                        > "changed-files-${BUILD_NUMBER}.tar.gz.sha256"
-
-                    ls -lh
+                    test -s artifacts/changed-files.tar.gz
+                    echo "Artifact packaged successfully."
                 '''
 
                 archiveArtifacts(
-                    artifacts: 'artifacts/*',
+                    artifacts: 'artifacts/changed-files.tar.gz',
                     fingerprint: true
                 )
             }
@@ -229,24 +223,19 @@ pipeline {
                     usernamePassword(
                         credentialsId: 'nexus-credentials',
                         usernameVariable: 'NEXUS_USER',
-                        passwordVariable: 'NEXUS_PASS'
+                        passwordVariable: 'NEXUS_PASSWORD'
                     )
                 ]) {
                     sh '''
                         set -eu
 
-                        ARTIFACT="$WORKSPACE/artifacts/changed-files-${BUILD_NUMBER}.tar.gz"
-                        CHECKSUM="${ARTIFACT}.sha256"
+                        ARTIFACT="artifacts/changed-files.tar.gz"
+                        DEST="$NEXUS_URL/repository/$NEXUS_REPOSITORY/changed-files-${BUILD_NUMBER}.tar.gz"
 
-                        curl --fail --silent --show-error \
-                            --user "$NEXUS_USER:$NEXUS_PASS" \
+                        curl --fail --show-error --silent \
+                            --user "$NEXUS_USER:$NEXUS_PASSWORD" \
                             --upload-file "$ARTIFACT" \
-                            "$NEXUS_URL/repository/$NEXUS_REPOSITORY/changed-files-${BUILD_NUMBER}.tar.gz"
-
-                        curl --fail --silent --show-error \
-                            --user "$NEXUS_USER:$NEXUS_PASS" \
-                            --upload-file "$CHECKSUM" \
-                            "$NEXUS_URL/repository/$NEXUS_REPOSITORY/changed-files-${BUILD_NUMBER}.tar.gz.sha256"
+                            "$DEST"
 
                         echo "Artifact uploaded to Nexus."
                     '''
@@ -266,12 +255,14 @@ pipeline {
                     sh '''
                         set -eu
 
-                        RESPONSE=$(curl --fail --silent --show-error \
-                            -H "Authorization: Bearer $GH_TOKEN" \
-                            -H "Accept: application/vnd.github+json" \
-                            "$GITHUB_API/repos/$GITHUB_REPO/pulls?state=open&head=chvkarthik-87:$FEATURE_BRANCH&base=$MAIN_BRANCH")
+                        BRANCH=$(git branch --show-current)
 
-                        PR_NUMBER=$(printf '%s' "$RESPONSE" | python3 -c '
+                        # Reuse an open PR for this source branch if present.
+                        PRS=$(curl --fail --silent --show-error \
+                            --user "$GH_USER:$GH_TOKEN" \
+                            "https://api.github.com/repos/$GITHUB_REPO/pulls?state=open&head=$GH_USER:$BRANCH&base=$MAIN_BRANCH")
+
+                        PR_NUMBER=$(printf '%s' "$PRS" | python3 -c '
 import json,sys
 items=json.load(sys.stdin)
 print(items[0]["number"] if items else "")
@@ -281,29 +272,33 @@ print(items[0]["number"] if items else "")
                             PAYLOAD=$(python3 -c '
 import json,os
 print(json.dumps({
-  "title":"Automated changed-file validation",
-  "head":os.environ["FEATURE_BRANCH"],
-  "base":os.environ["MAIN_BRANCH"],
-  "body":"Created by Jenkins after changed-file validation and artifact packaging."
+    "title": "Automated validated changes - build " + os.environ["BUILD_NUMBER"],
+    "head": os.environ["BRANCH"],
+    "base": os.environ["MAIN_BRANCH"],
+    "body": "Created automatically by Jenkins after changed-file validation."
 }))
-')
+' )
 
                             RESPONSE=$(curl --fail --silent --show-error \
-                                -X POST \
-                                -H "Authorization: Bearer $GH_TOKEN" \
+                                --user "$GH_USER:$GH_TOKEN" \
                                 -H "Accept: application/vnd.github+json" \
+                                -H "X-GitHub-Api-Version: 2022-11-28" \
                                 -H "Content-Type: application/json" \
+                                -X POST \
                                 -d "$PAYLOAD" \
-                                "$GITHUB_API/repos/$GITHUB_REPO/pulls")
+                                "https://api.github.com/repos/$GITHUB_REPO/pulls")
 
                             PR_NUMBER=$(printf '%s' "$RESPONSE" | python3 -c '
 import json,sys
 print(json.load(sys.stdin)["number"])
 ')
+
+                            echo "Created pull request #$PR_NUMBER"
+                        else
+                            echo "Reusing open pull request #$PR_NUMBER"
                         fi
 
-                        echo "$PR_NUMBER" > "$WORKSPACE/pr-number.txt"
-                        echo "Pull request: #$PR_NUMBER"
+                        echo "$PR_NUMBER" > pr-number.txt
                     '''
                 }
             }
@@ -321,24 +316,57 @@ print(json.load(sys.stdin)["number"])
                     sh '''
                         set -eu
 
-                        PR_NUMBER=$(cat "$WORKSPACE/pr-number.txt")
-                        PAYLOAD='{"merge_method":"squash","commit_title":"Automated validation and artifact packaging"}'
+                        PR_NUMBER=$(cat pr-number.txt)
 
-                        RESPONSE=$(curl --fail --silent --show-error \
-                            -X PUT \
-                            -H "Authorization: Bearer $GH_TOKEN" \
-                            -H "Accept: application/vnd.github+json" \
-                            -H "Content-Type: application/json" \
-                            -d "$PAYLOAD" \
-                            "$GITHUB_API/repos/$GITHUB_REPO/pulls/$PR_NUMBER/merge")
+                        # Re-check the source branch after validation.
+                        git fetch origin "$SOURCE_BRANCH"
 
-                        printf '%s' "$RESPONSE" | python3 -c '
+                        PR_DATA=$(curl --fail --silent --show-error \
+                            --user "$GH_USER:$GH_TOKEN" \
+                            "https://api.github.com/repos/$GITHUB_REPO/pulls/$PR_NUMBER")
+
+                        PR_STATE=$(printf '%s' "$PR_DATA" | python3 -c '
 import json,sys
-data=json.load(sys.stdin)
-if not data.get("merged"):
-    raise SystemExit("GitHub did not confirm the merge.")
-print("Pull request merged successfully.")
-'
+print(json.load(sys.stdin)["state"])
+')
+
+                        PR_MERGED=$(printf '%s' "$PR_DATA" | python3 -c '
+import json,sys
+print(str(json.load(sys.stdin)["merged"]).lower())
+')
+
+                        if [ "$PR_STATE" != "open" ]; then
+                            echo "ERROR: Pull request is not open."
+                            exit 1
+                        fi
+
+                        if [ "$PR_MERGED" = "true" ]; then
+                            echo "Pull request is already merged."
+                            exit 0
+                        fi
+
+                        PAYLOAD='{"merge_method":"squash"}'
+
+                        RESULT=$(curl --fail --silent --show-error \
+                            --user "$GH_USER:$GH_TOKEN" \
+                            -H "Accept: application/vnd.github+json" \
+                            -H "X-GitHub-Api-Version: 2022-11-28" \
+                            -H "Content-Type: application/json" \
+                            -X PUT \
+                            -d "$PAYLOAD" \
+                            "https://api.github.com/repos/$GITHUB_REPO/pulls/$PR_NUMBER/merge")
+
+                        MERGED=$(printf '%s' "$RESULT" | python3 -c '
+import json,sys
+print(str(json.load(sys.stdin).get("merged",False)).lower())
+')
+
+                        if [ "$MERGED" != "true" ]; then
+                            echo "ERROR: GitHub did not confirm the merge."
+                            exit 1
+                        fi
+
+                        echo "SUCCESS: Pull request #$PR_NUMBER merged."
                     '''
                 }
             }
@@ -347,15 +375,15 @@ print("Pull request merged successfully.")
 
     post {
         success {
-            echo 'SUCCESS: Changed files validated and artifact uploaded.'
+            echo 'SUCCESS: Validation, artifact upload, and PR merge stages completed.'
         }
 
         failure {
-            echo 'FAILED: Check Console Output for the failing stage.'
+            echo 'FAILURE: Check Console Output. Invalid files stop the pipeline before PR creation and merge.'
         }
 
         always {
-            echo 'Pipeline finished.'
+            echo 'Pipeline execution finished.'
         }
     }
 }
