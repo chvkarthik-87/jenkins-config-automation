@@ -27,8 +27,8 @@ pipeline {
 
                 sh '''
                     set -eu
-                    test -f source/deploy.sh
-                    echo "Feature branch checkout successful."
+                    echo "Checked out feature branch."
+                    git -C source status --short
                 '''
             }
         }
@@ -47,7 +47,7 @@ pipeline {
                         git reset --hard origin/feature/config-update
 
                         if git merge --no-edit origin/main; then
-                            echo "Main merged without conflicts."
+                            echo "Main branch sync successful."
                         else
                             CONFLICTS=$(git diff --name-only --diff-filter=U)
 
@@ -56,7 +56,7 @@ pipeline {
                                 git add Jenkinsfile-bash-validation
                                 git commit --no-edit
                             else
-                                echo "Unexpected conflict; stopping safely."
+                                echo "Unexpected merge conflict:"
                                 printf '%s\\n' "$CONFLICTS"
                                 git merge --abort || true
                                 exit 1
@@ -75,7 +75,8 @@ pipeline {
                     dir('source') {
                         sh '''
                             set -eu
-                            AUTH=$(printf '%s' "$GH_USER:$GH_TOKEN" | base64 | tr -d '\\n')
+                            AUTH=$(printf '%s' "$GH_USER:$GH_TOKEN" |
+                                base64 | tr -d '\\n')
 
                             git -c http.extraheader="AUTHORIZATION: basic $AUTH" \
                                 push origin HEAD:feature/config-update
@@ -85,23 +86,115 @@ pipeline {
             }
         }
 
-        stage('Bash Syntax Validation') {
+        stage('Identify Changed Files') {
             steps {
-                sh '''
-                    set -eu
-                    bash -n source/deploy.sh
-                    echo "Bash syntax validation passed."
-                '''
+                dir('source') {
+                    sh '''
+                        set -eu
+
+                        git fetch origin main feature/config-update
+
+                        BASE=$(git merge-base origin/main HEAD)
+
+                        git diff --name-only "$BASE" HEAD \
+                            > "$WORKSPACE/changed-files.txt"
+
+                        echo "Changed files:"
+                        cat "$WORKSPACE/changed-files.txt"
+                    '''
+                }
             }
         }
 
-        stage('Bash Formatting Validation') {
+        stage('Validate Changed Files') {
             steps {
-                sh '''
-                    set -eu
-                    shfmt -d source/deploy.sh
-                    echo "Bash formatting validation passed."
-                '''
+                dir('source') {
+                    sh '''
+                        set -eu
+
+                        if [ ! -s "$WORKSPACE/changed-files.txt" ]; then
+                            echo "No changed files to validate."
+                            exit 0
+                        fi
+
+                        FAILED=0
+                        CHECKED=0
+
+                        while IFS= read -r FILE; do
+                            [ -n "$FILE" ] || continue
+
+                            # Ignore deleted files
+                            [ -f "$FILE" ] || {
+                                echo "Skipping deleted/missing file: $FILE"
+                                continue
+                            }
+
+                            echo "Checking: $FILE"
+                            CHECKED=$((CHECKED + 1))
+
+                            case "$FILE" in
+                                *.sh)
+                                    if bash -n "$FILE"; then
+                                        echo "Bash syntax OK: $FILE"
+                                    else
+                                        echo "Bash syntax FAILED: $FILE"
+                                        FAILED=1
+                                    fi
+                                    ;;
+
+                                Jenkinsfile|Jenkinsfile-*|jenkinsfile)
+                                    echo "Pipeline file detected: $FILE"
+                                    echo "Groovy syntax validation requires a configured Groovy/Jenkins validator."
+                                    ;;
+
+                                *.json)
+                                    if python3 -m json.tool "$FILE" >/dev/null; then
+                                        echo "JSON syntax OK: $FILE"
+                                    else
+                                        echo "JSON syntax FAILED: $FILE"
+                                        FAILED=1
+                                    fi
+                                    ;;
+
+                                *.yaml|*.yml)
+                                    if python3 -c 'import yaml' >/dev/null 2>&1; then
+                                        if python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$FILE"; then
+                                            echo "YAML syntax OK: $FILE"
+                                        else
+                                            echo "YAML syntax FAILED: $FILE"
+                                            FAILED=1
+                                        fi
+                                    else
+                                        echo "ERROR: PyYAML is not installed; cannot validate $FILE"
+                                        FAILED=1
+                                    fi
+                                    ;;
+
+                                *.xml)
+                                    if python3 -c 'import sys,xml.etree.ElementTree as E; E.parse(sys.argv[1])' "$FILE"; then
+                                        echo "XML syntax OK: $FILE"
+                                    else
+                                        echo "XML syntax FAILED: $FILE"
+                                        FAILED=1
+                                    fi
+                                    ;;
+
+                                *)
+                                    echo "No syntax validator configured for: $FILE"
+                                    ;;
+                            esac
+                        done < "$WORKSPACE/changed-files.txt"
+
+                        echo "Files inspected: $CHECKED"
+
+                        if [ "$FAILED" -ne 0 ]; then
+                            echo "One or more validations failed."
+                            exit 1
+                        fi
+
+                        echo "Changed-file validation completed."
+                    '''
+                }
             }
         }
 
@@ -109,20 +202,22 @@ pipeline {
             steps {
                 sh '''
                     set -eu
-                    mkdir -p source/artifacts
 
-                    tar -czf "source/artifacts/deploy-script-${BUILD_NUMBER}.tar.gz" \
-                        -C source deploy.sh
+                    mkdir -p "$WORKSPACE/artifacts"
 
-                    cd source/artifacts
-                    sha256sum "deploy-script-${BUILD_NUMBER}.tar.gz" \
-                        > "deploy-script-${BUILD_NUMBER}.tar.gz.sha256"
+                    tar -czf "$WORKSPACE/artifacts/changed-files-${BUILD_NUMBER}.tar.gz" \
+                        -C "$WORKSPACE" changed-files.txt
+
+                    cd "$WORKSPACE/artifacts"
+
+                    sha256sum "changed-files-${BUILD_NUMBER}.tar.gz" \
+                        > "changed-files-${BUILD_NUMBER}.tar.gz.sha256"
 
                     ls -lh
                 '''
 
                 archiveArtifacts(
-                    artifacts: 'source/artifacts/*',
+                    artifacts: 'artifacts/*',
                     fingerprint: true
                 )
             }
@@ -140,23 +235,20 @@ pipeline {
                     sh '''
                         set -eu
 
-                        ARTIFACT="source/artifacts/deploy-script-${BUILD_NUMBER}.tar.gz"
+                        ARTIFACT="$WORKSPACE/artifacts/changed-files-${BUILD_NUMBER}.tar.gz"
                         CHECKSUM="${ARTIFACT}.sha256"
-
-                        test -f "$ARTIFACT"
-                        test -f "$CHECKSUM"
 
                         curl --fail --silent --show-error \
                             --user "$NEXUS_USER:$NEXUS_PASS" \
                             --upload-file "$ARTIFACT" \
-                            "$NEXUS_URL/repository/$NEXUS_REPOSITORY/deploy-script-${BUILD_NUMBER}.tar.gz"
+                            "$NEXUS_URL/repository/$NEXUS_REPOSITORY/changed-files-${BUILD_NUMBER}.tar.gz"
 
                         curl --fail --silent --show-error \
                             --user "$NEXUS_USER:$NEXUS_PASS" \
                             --upload-file "$CHECKSUM" \
-                            "$NEXUS_URL/repository/$NEXUS_REPOSITORY/deploy-script-${BUILD_NUMBER}.tar.gz.sha256"
+                            "$NEXUS_URL/repository/$NEXUS_REPOSITORY/changed-files-${BUILD_NUMBER}.tar.gz.sha256"
 
-                        echo "Artifact and checksum uploaded to Nexus."
+                        echo "Artifact uploaded to Nexus."
                     '''
                 }
             }
@@ -180,19 +272,19 @@ pipeline {
                             "$GITHUB_API/repos/$GITHUB_REPO/pulls?state=open&head=chvkarthik-87:$FEATURE_BRANCH&base=$MAIN_BRANCH")
 
                         PR_NUMBER=$(printf '%s' "$RESPONSE" | python3 -c '
-import json, sys
-items = json.load(sys.stdin)
+import json,sys
+items=json.load(sys.stdin)
 print(items[0]["number"] if items else "")
 ')
 
                         if [ -z "$PR_NUMBER" ]; then
                             PAYLOAD=$(python3 -c '
-import json, os
+import json,os
 print(json.dumps({
-    "title": "Bash validation and artifact packaging",
-    "head": os.environ["FEATURE_BRANCH"],
-    "base": os.environ["MAIN_BRANCH"],
-    "body": "Jenkins validates deploy.sh, packages the artifact, and uploads it to Nexus."
+  "title":"Automated changed-file validation",
+  "head":os.environ["FEATURE_BRANCH"],
+  "base":os.environ["MAIN_BRANCH"],
+  "body":"Created by Jenkins after changed-file validation and artifact packaging."
 }))
 ')
 
@@ -205,13 +297,13 @@ print(json.dumps({
                                 "$GITHUB_API/repos/$GITHUB_REPO/pulls")
 
                             PR_NUMBER=$(printf '%s' "$RESPONSE" | python3 -c '
-import json, sys
+import json,sys
 print(json.load(sys.stdin)["number"])
 ')
                         fi
 
                         echo "$PR_NUMBER" > "$WORKSPACE/pr-number.txt"
-                        echo "Using PR #$PR_NUMBER"
+                        echo "Pull request: #$PR_NUMBER"
                     '''
                 }
             }
@@ -230,7 +322,7 @@ print(json.load(sys.stdin)["number"])
                         set -eu
 
                         PR_NUMBER=$(cat "$WORKSPACE/pr-number.txt")
-                        PAYLOAD='{"merge_method":"squash","commit_title":"Bash validation and artifact packaging"}'
+                        PAYLOAD='{"merge_method":"squash","commit_title":"Automated validation and artifact packaging"}'
 
                         RESPONSE=$(curl --fail --silent --show-error \
                             -X PUT \
@@ -241,11 +333,11 @@ print(json.load(sys.stdin)["number"])
                             "$GITHUB_API/repos/$GITHUB_REPO/pulls/$PR_NUMBER/merge")
 
                         printf '%s' "$RESPONSE" | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
+import json,sys
+data=json.load(sys.stdin)
 if not data.get("merged"):
-    raise SystemExit("GitHub did not confirm the PR merge.")
-print("GitHub confirmed the PR merge.")
+    raise SystemExit("GitHub did not confirm the merge.")
+print("Pull request merged successfully.")
 '
                     '''
                 }
@@ -255,15 +347,15 @@ print("GitHub confirmed the PR merge.")
 
     post {
         success {
-            echo 'SUCCESS: Validation, artifact packaging, Nexus upload, and PR merge completed.'
+            echo 'SUCCESS: Changed files validated and artifact uploaded.'
         }
 
         failure {
-            echo 'FAILED: Check Console Output for the failed stage.'
+            echo 'FAILED: Check Console Output for the failing stage.'
         }
 
         always {
-            echo 'Jenkins pipeline finished.'
+            echo 'Pipeline finished.'
         }
     }
 }
