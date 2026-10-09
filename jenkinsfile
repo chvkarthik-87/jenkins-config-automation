@@ -7,7 +7,7 @@ pipeline {
         skipDefaultCheckout(true)
     }
 
-    parameters {
+    parameters {fe
         choice(name: 'ENVIRONMENT',
                choices: ['dev', 'stage', 'uat', 'prod'],
                description: 'Select environment')
@@ -120,7 +120,7 @@ pipeline {
             steps {
                 script {
                     env.FEATURE_BRANCH =
-                        "feature/config-${params.ENVIRONMENT}-${params.NODE}-${env.BUILD_NUMBER}"
+                        "feature/config-${ENVIRONMENT}-${NODE}"
                 }
 
                 sh '''
