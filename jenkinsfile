@@ -1,17 +1,66 @@
 pipeline {
     agent any
 
+    parameters {
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['dev', 'stage', 'uat', 'prod'],
+            description: 'Select environment'
+        )
+        choice(
+            name: 'NODE',
+            choices: ['dev', 'stage', 'uat', 'prod'],
+            description: 'Select node configuration'
+        )
+        string(
+            name: 'ENV_APPNAME',
+            defaultValue: 'myapp',
+            description: 'Application name'
+        )
+        string(
+            name: 'ENV_VERSION',
+            defaultValue: '2.0.0',
+            description: 'Enter the new version manually'
+        )
+        string(
+            name: 'ENV_REPLICAS',
+            defaultValue: '1',
+            description: 'Number of replicas'
+        )
+        choice(
+            name: 'ENV_LOGLEVEL',
+            choices: ['INFO', 'DEBUG', 'WARN', 'ERROR'],
+            description: 'Application log level'
+        )
+        string(
+            name: 'NODE_NAME',
+            defaultValue: 'node-01',
+            description: 'Node name'
+        )
+        choice(
+            name: 'NODE_TYPE',
+            choices: ['worker', 'master'],
+            description: 'Node type'
+        )
+        string(
+            name: 'NODE_REGION',
+            defaultValue: 'us-east-1',
+            description: 'AWS region'
+        )
+        string(
+            name: 'NODE_AZ',
+            defaultValue: 'us-east-1a',
+            description: 'Availability zone'
+        )
+    }
+
     tools {
         maven 'Maven-3'
     }
 
     environment {
-        GITHUB_REPO = 'https://github.com/chvkarthik-87/jenkins-config-automation.git'
         GITHUB_API = 'https://api.github.com/repos/chvkarthik-87/jenkins-config-automation'
-
         SONAR_SERVER = 'SonarQube-Server'
-        SONAR_SCANNER = 'SonarQube-Scanner'
-
         NEXUS_URL = 'http://98.83.162.0:8081'
         NEXUS_REPOSITORY = 'maven-releases'
         GROUP_ID = 'com.chvkarthik.config'
@@ -19,11 +68,13 @@ pipeline {
     }
 
     stages {
+
         stage('Checkout') {
             steps {
                 checkout scm
 
                 sh '''
+                    set -eu
                     git config user.name "Jenkins"
                     git config user.email "jenkins@example.com"
                     git fetch origin main
@@ -37,33 +88,37 @@ pipeline {
                 script {
                     env.SELECTED_ENV = params.ENVIRONMENT.toString()
                     env.SELECTED_NODE = params.NODE.toString()
-                    env.NEW_VERSION = params.ENV_VERSION.toString()
+                    env.NEW_VERSION = params.ENV_VERSION.toString().trim()
 
-                    def envFile = "environment/${env.SELECTED_ENV}.json"
+                    if (!(env.SELECTED_ENV in ['dev', 'stage', 'uat', 'prod'])) {
+                        error('Invalid ENVIRONMENT selected.')
+                    }
 
-                    def jsonText = sh(
-                        script: "git show origin/main:${envFile}",
-                        returnStdout: true
-                    ).trim()
+                    if (!(env.SELECTED_NODE in ['dev', 'stage', 'uat', 'prod'])) {
+                        error('Invalid NODE selected.')
+                    }
 
-                    def config = new groovy.json.JsonSlurperClassic()
-                        .parseText(jsonText)
-
-                    env.OLD_VERSION = config.version.toString()
-
-                    echo "Environment: ${env.SELECTED_ENV}"
-                    echo "Node: ${env.SELECTED_NODE}"
-                    echo "Current version: ${env.OLD_VERSION}"
-                    echo "New version: ${env.NEW_VERSION}"
-
-                    if (!env.NEW_VERSION?.trim()) {
+                    if (!env.NEW_VERSION) {
                         error('ENV_VERSION cannot be empty.')
                     }
 
-                    if (params.CURRENT_VERSION &&
-                        params.CURRENT_VERSION.toString() != env.OLD_VERSION) {
-                        error('Current version changed. Refresh Build with Parameters and try again.')
+                    if (!(env.NEW_VERSION ==~ /[0-9]+\\.[0-9]+\\.[0-9]+/)) {
+                        error('Enter version in format X.Y.Z, for example 2.0.0')
                     }
+
+                    env.OLD_VERSION = sh(
+                        script: """
+                            set -eu
+                            git show origin/main:environment/${env.SELECTED_ENV}.json |
+                            python3 -c "import json,sys; print(json.load(sys.stdin)['version'])"
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    echo "Selected environment: ${env.SELECTED_ENV}"
+                    echo "Selected node: ${env.SELECTED_NODE}"
+                    echo "Current version in GitHub main: ${env.OLD_VERSION}"
+                    echo "New version entered: ${env.NEW_VERSION}"
                 }
             }
         }
@@ -74,49 +129,71 @@ pipeline {
                     env.FEATURE_BRANCH =
                         "feature/config-${env.SELECTED_ENV}-${env.SELECTED_NODE}-${env.BUILD_NUMBER}"
 
-                    sh 'git checkout -B "$FEATURE_BRANCH" origin/main'
+                    sh '''
+                        set -eu
+                        git checkout -B "$FEATURE_BRANCH" origin/main
+                    '''
                 }
             }
         }
 
         stage('Update JSON Files') {
             steps {
-                script {
-                    def envFile = "environment/${env.SELECTED_ENV}.json"
-                    def nodeFile = "node/${env.SELECTED_NODE}.json"
+                withEnv([
+                    "APP_NAME=${params.ENV_APPNAME}",
+                    "APP_VERSION=${params.ENV_VERSION}",
+                    "APP_REPLICAS=${params.ENV_REPLICAS}",
+                    "APP_LOGLEVEL=${params.ENV_LOGLEVEL}",
+                    "CONFIG_NODE_NAME=${params.NODE_NAME}",
+                    "CONFIG_NODE_TYPE=${params.NODE_TYPE}",
+                    "CONFIG_NODE_REGION=${params.NODE_REGION}",
+                    "CONFIG_NODE_AZ=${params.NODE_AZ}"
+                ]) {
+                    sh '''
+                        set -eu
 
-                    def envConfig = new groovy.json.JsonSlurperClassic()
-                        .parseText(readFile(envFile))
+                        python3 - <<'PY'
+import json
+import os
 
-                    envConfig.appName = params.ENV_APPNAME
-                    envConfig.version = env.NEW_VERSION
-                    envConfig.replicas = params.ENV_REPLICAS.toInteger()
-                    envConfig.logLevel = params.ENV_LOGLEVEL
+env_name = os.environ["SELECTED_ENV"]
+node_name = os.environ["SELECTED_NODE"]
 
-                    writeFile(
-                        file: envFile,
-                        text: groovy.json.JsonOutput.prettyPrint(
-                            groovy.json.JsonOutput.toJson(envConfig)
-                        ) + '\n'
-                    )
+env_file = f"environment/{env_name}.json"
+node_file = f"node/{node_name}.json"
 
-                    def nodeConfig = new groovy.json.JsonSlurperClassic()
-                        .parseText(readFile(nodeFile))
+replicas = int(os.environ["APP_REPLICAS"])
+if replicas < 1:
+    raise ValueError("Replicas must be at least 1")
 
-                    nodeConfig.name = params.NODE_NAME
-                    nodeConfig.type = params.NODE_TYPE
-                    nodeConfig.region = params.NODE_REGION
-                    nodeConfig.availabilityZone = params.NODE_AZ
+with open(env_file, encoding="utf-8") as f:
+    env_config = json.load(f)
 
-                    writeFile(
-                        file: nodeFile,
-                        text: groovy.json.JsonOutput.prettyPrint(
-                            groovy.json.JsonOutput.toJson(nodeConfig)
-                        ) + '\n'
-                    )
+env_config["appName"] = os.environ["APP_NAME"]
+env_config["version"] = os.environ["APP_VERSION"]
+env_config["replicas"] = replicas
+env_config["logLevel"] = os.environ["APP_LOGLEVEL"]
 
-                    echo "Updated ${envFile}"
-                    echo "Updated ${nodeFile}"
+with open(env_file, "w", encoding="utf-8") as f:
+    json.dump(env_config, f, indent=2)
+    f.write("\\n")
+
+with open(node_file, encoding="utf-8") as f:
+    node_config = json.load(f)
+
+node_config["name"] = os.environ["CONFIG_NODE_NAME"]
+node_config["type"] = os.environ["CONFIG_NODE_TYPE"]
+node_config["region"] = os.environ["CONFIG_NODE_REGION"]
+node_config["availabilityZone"] = os.environ["CONFIG_NODE_AZ"]
+
+with open(node_file, "w", encoding="utf-8") as f:
+    json.dump(node_config, f, indent=2)
+    f.write("\\n")
+
+print("Updated:", env_file)
+print("Updated:", node_file)
+PY
+                    '''
                 }
             }
         }
@@ -128,7 +205,8 @@ pipeline {
 
                     withSonarQubeEnv('SonarQube-Server') {
                         sh """
-                            "\${scannerHome}/bin/sonar-scanner" \
+                            set -eu
+                            "${scannerHome}/bin/sonar-scanner" \
                               -Dsonar.projectKey=jenkins-config-automation \
                               -Dsonar.projectName=jenkins-config-automation \
                               -Dsonar.sources=environment,node \
@@ -142,10 +220,13 @@ pipeline {
         stage('Maven Compilation') {
             steps {
                 sh '''
+                    set -eu
+
                     if [ -f pom.xml ]; then
                         mvn -B clean package
                     else
-                        echo "No pom.xml found; Maven compilation skipped."
+                        echo "WARNING: pom.xml is not present in this repository."
+                        echo "Maven stage ran, but there is no Maven project to compile."
                     fi
                 '''
             }
@@ -154,6 +235,7 @@ pipeline {
         stage('Review Changes') {
             steps {
                 sh '''
+                    set -eu
                     git diff --check
                     git diff -- environment node
                 '''
@@ -163,8 +245,15 @@ pipeline {
         stage('Commit Changes') {
             steps {
                 sh '''
+                    set -eu
+
                     git add "environment/${SELECTED_ENV}.json"
                     git add "node/${SELECTED_NODE}.json"
+
+                    if git diff --cached --quiet; then
+                        echo "No configuration changes detected."
+                        exit 1
+                    fi
 
                     git commit -m "Update ${SELECTED_ENV}/${SELECTED_NODE} to ${NEW_VERSION}"
                 '''
@@ -181,7 +270,9 @@ pipeline {
                     )
                 ]) {
                     sh '''
+                        set -eu
                         set +x
+
                         git push \
                           "https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com/chvkarthik-87/jenkins-config-automation.git" \
                           "$FEATURE_BRANCH"
@@ -200,49 +291,65 @@ pipeline {
                     )
                 ]) {
                     script {
-                        def existingPr = sh(
+                        env.PR_NUMBER = sh(
                             script: '''
+                                set -eu
                                 set +x
+
                                 curl -fsS \
                                   -H "Authorization: Bearer $GITHUB_TOKEN" \
                                   -H "Accept: application/vnd.github+json" \
-                                  "$GITHUB_API/pulls?state=open&head=chvkarthik-87:$FEATURE_BRANCH&base=main" \
-                                | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['number'] if d else '')"
+                                  "$GITHUB_API/pulls?state=open&head=chvkarthik-87:$FEATURE_BRANCH&base=main" |
+                                python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['number'] if d else '')"
                             ''',
                             returnStdout: true
                         ).trim()
 
-                        if (existingPr) {
-                            env.PR_NUMBER = existingPr
-                        } else {
-                            def payload = [
-                                title: "Update ${env.SELECTED_ENV}/${env.SELECTED_NODE} to ${env.NEW_VERSION}",
-                                head: env.FEATURE_BRANCH,
-                                base: 'main',
-                                body: "Automated configuration update from Jenkins build ${env.BUILD_NUMBER}."
-                            ]
-
-                            writeFile(
-                                file: 'pr-payload.json',
-                                text: groovy.json.JsonOutput.toJson(payload)
-                            )
-
-                            env.PR_NUMBER = sh(
-                                script: '''
+                        if (!env.PR_NUMBER) {
+                            withEnv([
+                                "PR_TITLE=Update ${env.SELECTED_ENV}/${env.SELECTED_NODE} to ${env.NEW_VERSION}",
+                                "PR_BRANCH=${env.FEATURE_BRANCH}",
+                                "PR_BUILD=${env.BUILD_NUMBER}"
+                            ]) {
+                                sh '''
+                                    set -eu
                                     set +x
-                                    curl -fsS -X POST \
-                                      -H "Authorization: Bearer $GITHUB_TOKEN" \
-                                      -H "Accept: application/vnd.github+json" \
-                                      -H "Content-Type: application/json" \
-                                      "$GITHUB_API/pulls" \
-                                      --data-binary @pr-payload.json \
-                                    | python3 -c "import json,sys; print(json.load(sys.stdin)['number'])"
-                                ''',
-                                returnStdout: true
-                            ).trim()
+
+                                    python3 - <<'PY'
+import json
+import os
+
+payload = {
+    "title": os.environ["PR_TITLE"],
+    "head": os.environ["PR_BRANCH"],
+    "base": "main",
+    "body": "Automated configuration update from Jenkins build "
+            + os.environ["PR_BUILD"]
+}
+with open("pr-payload.json", "w", encoding="utf-8") as f:
+    json.dump(payload, f)
+PY
+                                '''
+
+                                env.PR_NUMBER = sh(
+                                    script: '''
+                                        set -eu
+                                        set +x
+
+                                        curl -fsS -X POST \
+                                          -H "Authorization: Bearer $GITHUB_TOKEN" \
+                                          -H "Accept: application/vnd.github+json" \
+                                          -H "Content-Type: application/json" \
+                                          "$GITHUB_API/pulls" \
+                                          --data-binary @pr-payload.json |
+                                        python3 -c "import json,sys; print(json.load(sys.stdin)['number'])"
+                                    ''',
+                                    returnStdout: true
+                                ).trim()
+                            }
                         }
 
-                        echo "Pull request: #${env.PR_NUMBER}"
+                        echo "Pull request number: ${env.PR_NUMBER}"
                     }
                 }
             }
@@ -258,7 +365,9 @@ pipeline {
                     )
                 ]) {
                     sh '''
+                        set -eu
                         set +x
+
                         curl -fsS -X PUT \
                           -H "Authorization: Bearer $GITHUB_TOKEN" \
                           -H "Accept: application/vnd.github+json" \
@@ -273,13 +382,13 @@ pipeline {
         stage('Verify Main Branch') {
             steps {
                 sh '''
+                    set -eu
                     git fetch origin main
-                    git checkout -B verify-main origin/main
 
-                    echo "Updated environment configuration:"
+                    echo "Environment configuration after merge:"
                     git show "origin/main:environment/${SELECTED_ENV}.json"
 
-                    echo "Updated node configuration:"
+                    echo "Node configuration after merge:"
                     git show "origin/main:node/${SELECTED_NODE}.json"
                 '''
             }
@@ -288,7 +397,9 @@ pipeline {
         stage('Create ZIP Artifact') {
             steps {
                 sh '''
-                    rm -rf artifact
+                    set -eu
+
+                    rm -rf artifact config-artifact.zip
                     mkdir -p artifact/environment artifact/node
 
                     git show "origin/main:environment/${SELECTED_ENV}.json" \
@@ -319,6 +430,7 @@ pipeline {
                     )
                 ]) {
                     sh '''
+                        set -eu
                         set +x
 
                         curl -fsS \
@@ -342,11 +454,11 @@ pipeline {
             echo "SUCCESS: ${env.OLD_VERSION} -> ${env.NEW_VERSION}"
             echo "Environment: ${env.SELECTED_ENV}"
             echo "Node: ${env.SELECTED_NODE}"
-            echo 'GitHub merge, configuration artifact and Nexus upload completed.'
+            echo "Configuration merged and artifact uploaded."
         }
 
         failure {
-            echo 'Pipeline failed. Check the Console Output for the exact failing stage.'
+            echo 'Pipeline failed. Check the first error in Console Output.'
         }
 
         always {
